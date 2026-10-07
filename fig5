@@ -1,0 +1,787 @@
+-- =============================================================================
+-- FIGURE 5 — SYSTEM-LEVEL KNOWLEDGE CONNECTIVITY
+-- REVISED VERSION
+--
+-- CONCEPT
+-- -------
+-- Figure 4 establishes collaboration-mediated country-specific knowledge
+-- activation at the collaboration-event / focal-broker level.
+--
+-- Figure 5 moves to the SYSTEM LEVEL:
+--
+--   How much of country-specific knowledge associated with foreign-trained
+--   faculty is integrated into mixed teams that also contain U.S.-trained
+--   faculty?
+--
+
+-- =============================================================================
+
+
+
+-- =============================================================================
+-- 1. COUNTRY-LEVEL FIGURE 5 DATA — CORRECTED
+-- =============================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.fig5_revised_country`
+AS
+
+SELECT
+
+  p.country_code,
+
+  p.country,
+
+  p.degree_country_rank,
+
+  p.n_matching_trained_professors,
+
+  p.n_matching_trained_papers,
+
+
+  -- ===========================================================================
+  -- PANEL A: SCIENTIFIC PRESENCE
+  -- ===========================================================================
+
+  p.share_fractional_authorship
+    AS authorship_share,
+
+
+  -- ===========================================================================
+  -- PANEL A: MATCHING-COUNTRY KNOWLEDGE CONTRIBUTION
+  -- ===========================================================================
+
+  k.matching_share_country_knowledge
+    AS matching_knowledge_share,
+
+  k.total_country_knowledge,
+
+  k.matching_country_knowledge,
+
+  k.us_trained_share_country_knowledge,
+
+  k.other_foreign_share_country_knowledge,
+
+
+  -- ===========================================================================
+  -- KNOWLEDGE CONTRIBUTION COUNTS
+  -- ===========================================================================
+
+  k.n_positive_country_use_papers,
+
+  k.n_positive_use_papers_with_matching_professor,
+
+
+  -- ===========================================================================
+  -- PANEL A: KNOWLEDGE-TO-PRESENCE RATIO
+  -- ===========================================================================
+
+  SAFE_DIVIDE(
+    k.matching_share_country_knowledge,
+    p.share_fractional_authorship
+  )
+    AS knowledge_to_presence_ratio,
+
+
+  -- ===========================================================================
+  -- PANEL B: COLLABORATIVE GATEWAY
+  --
+  -- Numerator:
+  --   country-c knowledge on papers containing BOTH
+  --       >=1 c-trained AARC faculty member
+  --       >=1 U.S.-trained AARC faculty member
+  --
+  -- Denominator:
+  --   country-c knowledge on all papers containing
+  --       >=1 c-trained AARC faculty member
+  -- ===========================================================================
+
+  cr.collaborative_reach_share
+    AS collaborative_gateway_share,
+
+  cr.matching_participation_knowledge,
+
+  cr.mixed_team_matching_knowledge,
+
+
+  -- ===========================================================================
+  -- COLLABORATIVE-GATEWAY COUNTS
+  -- ===========================================================================
+
+  cr.n_matching_participation_papers,
+
+  cr.n_mixed_team_papers,
+
+
+  -- ===========================================================================
+  -- SHARE OF ALL COUNTRY-c KNOWLEDGE APPEARING ON MIXED GATEWAY TEAMS
+  -- ===========================================================================
+
+  SAFE_DIVIDE(
+    cr.mixed_team_matching_knowledge,
+    k.total_country_knowledge
+  )
+    AS mixed_team_share_of_all_country_knowledge,
+
+
+  -- ===========================================================================
+  -- PROPORTIONAL-AUTHORSHIP BENCHMARK
+  -- ===========================================================================
+
+  p.share_fractional_authorship
+    *
+  k.total_country_knowledge
+    AS expected_matching_knowledge_under_presence
+
+
+FROM
+  `foreign-phd.unitanalysis.fig5_scientific_presence` AS p
+
+INNER JOIN
+  `foreign-phd.unitanalysis.fig5_knowledge_contribution` AS k
+
+ON
+  p.country_code = k.country_code
+  AND
+  p.country = k.country
+
+INNER JOIN
+  `foreign-phd.unitanalysis.fig5_collaborative_reach` AS cr
+
+ON
+  p.country_code = cr.country_code
+  AND
+  p.country = cr.country
+
+WHERE
+
+  p.share_fractional_authorship > 0
+
+  AND
+
+  k.total_country_knowledge > 0
+
+ORDER BY
+  p.degree_country_rank
+;
+
+
+-- =============================================================================
+-- VALIDATE THE REVISED TABLE IMMEDIATELY
+-- =============================================================================
+
+SELECT
+
+  COUNT(*) AS n_countries,
+
+  COUNTIF(
+    n_positive_country_use_papers IS NULL
+  ) AS missing_positive_use_counts,
+
+  COUNTIF(
+    n_positive_use_papers_with_matching_professor IS NULL
+  ) AS missing_matching_use_counts,
+
+  COUNTIF(
+    n_matching_participation_papers IS NULL
+  ) AS missing_matching_participation_counts,
+
+  COUNTIF(
+    n_mixed_team_papers IS NULL
+  ) AS missing_mixed_team_counts
+
+FROM
+  `foreign-phd.unitanalysis.fig5_revised_country`
+;
+
+
+-- =============================================================================
+-- 6. COUNTRY-LEVEL FINAL FIGURE 5 EXPORT
+-- =============================================================================
+
+SELECT
+
+  degree_country_rank,
+
+  country,
+
+  country_code,
+
+  n_matching_trained_professors,
+
+  n_matching_trained_papers,
+
+
+  -- Panel A
+  authorship_share,
+
+  matching_knowledge_share,
+
+  knowledge_to_presence_ratio,
+
+
+  -- Panel B
+  collaborative_gateway_share,
+
+  mixed_team_share_of_all_country_knowledge,
+
+
+  -- System-accounting quantities
+  expected_matching_knowledge_under_presence,
+
+  total_country_knowledge,
+
+  matching_country_knowledge,
+
+  matching_participation_knowledge,
+
+  mixed_team_matching_knowledge,
+
+
+  -- Knowledge-use counts
+  n_positive_country_use_papers,
+
+  n_positive_use_papers_with_matching_professor,
+
+
+  -- Gateway counts
+  n_matching_participation_papers,
+
+  n_mixed_team_papers
+
+FROM
+  `foreign-phd.unitanalysis.fig5_revised_country`
+
+ORDER BY
+  degree_country_rank
+;
+
+-- =============================================================================
+-- 2. PANEL A DATA
+-- MATCHING-COUNTRY KNOWLEDGE SHARE VS SCIENTIFIC PRESENCE
+-- =============================================================================
+
+SELECT
+
+  degree_country_rank,
+
+  country,
+
+  country_code,
+
+  n_matching_trained_professors,
+
+  100 * authorship_share
+    AS authorship_share_pct,
+
+  100 * matching_knowledge_share
+    AS matching_knowledge_share_pct,
+
+  knowledge_to_presence_ratio
+
+FROM
+  `foreign-phd.unitanalysis.fig5_revised_country`
+
+ORDER BY
+  degree_country_rank
+;
+
+
+
+-- =============================================================================
+-- 3. PANEL B DATA
+-- COLLABORATIVE GATEWAY
+--
+-- This is the primary new Figure 5 quantity.
+-- =============================================================================
+
+SELECT
+
+  degree_country_rank,
+
+  country,
+
+  country_code,
+
+  n_matching_trained_professors,
+
+  100 * collaborative_gateway_share
+    AS collaborative_gateway_pct,
+
+  100 * mixed_team_share_of_all_country_knowledge
+    AS mixed_team_share_of_all_country_knowledge_pct,
+
+  n_matching_participation_papers,
+
+  n_mixed_team_papers,
+
+  matching_participation_knowledge,
+
+  mixed_team_matching_knowledge
+
+FROM
+  `foreign-phd.unitanalysis.fig5_revised_country`
+
+ORDER BY
+  collaborative_gateway_share DESC
+;
+
+
+
+-- =============================================================================
+-- 4. SYSTEM-LEVEL ACCOUNTING SUMMARY
+--
+-- Four quantities:
+--
+--   1. observed matching-country knowledge contribution
+--   2. proportional-authorship benchmark
+--   3. amplification relative to benchmark
+--   4. share of matching-country knowledge carried into mixed teams
+--
+-- All knowledge-weighted, not simple averages across countries.
+-- =============================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.fig5_revised_system`
+AS
+
+WITH totals AS (
+
+  SELECT
+
+    SUM(
+      total_country_knowledge
+    )
+      AS total_country_knowledge,
+
+    SUM(
+      matching_country_knowledge
+    )
+      AS observed_matching_knowledge,
+
+    SUM(
+      expected_matching_knowledge_under_presence
+    )
+      AS expected_matching_knowledge,
+
+    SUM(
+      mixed_team_matching_knowledge
+    )
+      AS mixed_team_matching_knowledge,
+
+    SUM(
+      matching_participation_knowledge
+    )
+      AS matching_participation_knowledge
+
+  FROM
+    `foreign-phd.unitanalysis.fig5_revised_country`
+)
+
+
+SELECT
+
+  total_country_knowledge,
+
+  observed_matching_knowledge,
+
+  expected_matching_knowledge,
+
+  mixed_team_matching_knowledge,
+
+  matching_participation_knowledge,
+
+
+  -- ===========================================================================
+  -- OBSERVED SHARE OF ALL COUNTRY-SPECIFIC KNOWLEDGE
+  -- ===========================================================================
+
+  SAFE_DIVIDE(
+
+    observed_matching_knowledge,
+
+    total_country_knowledge
+
+  )
+    AS observed_matching_share,
+
+
+  -- ===========================================================================
+  -- EXPECTED SHARE UNDER PROPORTIONAL AUTHORSHIP
+  -- ===========================================================================
+
+  SAFE_DIVIDE(
+
+    expected_matching_knowledge,
+
+    total_country_knowledge
+
+  )
+    AS expected_matching_share,
+
+
+  -- ===========================================================================
+  -- AMPLIFICATION
+  --
+  -- Observed matching contribution / expected matching contribution.
+  -- ===========================================================================
+
+  SAFE_DIVIDE(
+
+    observed_matching_knowledge,
+
+    expected_matching_knowledge
+
+  )
+    AS knowledge_amplification,
+
+
+  -- ===========================================================================
+  -- MIXED-TEAM KNOWLEDGE SHARE
+  --
+  -- Of all country-specific knowledge associated with matching-country
+  -- participation, how much occurs on mixed teams?
+  -- ===========================================================================
+
+  SAFE_DIVIDE(
+
+    mixed_team_matching_knowledge,
+
+    matching_participation_knowledge
+
+  )
+    AS system_collaborative_gateway_share,
+
+
+  -- ===========================================================================
+  -- MIXED TEAM SHARE OF ALL COUNTRY-SPECIFIC KNOWLEDGE
+  -- ===========================================================================
+
+  SAFE_DIVIDE(
+
+    mixed_team_matching_knowledge,
+
+    total_country_knowledge
+
+  )
+    AS system_mixed_team_share_all_country_knowledge,
+
+
+  -- ===========================================================================
+  -- EXCESS MATCHING CONTRIBUTION ABOVE PROPORTIONAL BENCHMARK
+  -- ===========================================================================
+
+  observed_matching_knowledge
+    -
+  expected_matching_knowledge
+    AS excess_matching_knowledge,
+
+
+  SAFE_DIVIDE(
+
+    observed_matching_knowledge
+      -
+    expected_matching_knowledge,
+
+    observed_matching_knowledge
+
+  )
+    AS share_of_observed_matching_contribution_above_benchmark
+
+FROM
+  totals
+;
+
+
+
+-- =============================================================================
+-- 5. SYSTEM SUMMARY OUTPUT
+-- =============================================================================
+
+SELECT
+
+  total_country_knowledge,
+
+  observed_matching_knowledge,
+
+  expected_matching_knowledge,
+
+  observed_matching_share,
+
+  expected_matching_share,
+
+  knowledge_amplification,
+
+  system_collaborative_gateway_share,
+
+  system_mixed_team_share_all_country_knowledge,
+
+  excess_matching_knowledge,
+
+  share_of_observed_matching_contribution_above_benchmark
+
+FROM
+  `foreign-phd.unitanalysis.fig5_revised_system`
+;
+
+
+
+-- =============================================================================
+-- 6. COUNTRY-LEVEL FINAL FIGURE 5 EXPORT
+--
+-- Single table for the Python plotting notebook.
+-- =============================================================================
+
+SELECT
+
+  degree_country_rank,
+
+  country,
+
+  country_code,
+
+  n_matching_trained_professors,
+
+  n_matching_trained_papers,
+
+
+  -- Panel A
+  authorship_share,
+
+  matching_knowledge_share,
+
+  knowledge_to_presence_ratio,
+
+
+  -- Panel B
+  collaborative_gateway_share,
+
+
+  -- Panel C supporting measures
+  expected_matching_knowledge_under_presence,
+
+  total_country_knowledge,
+
+  matching_country_knowledge,
+
+  matching_participation_knowledge,
+
+  mixed_team_matching_knowledge,
+
+
+  -- Counts
+  n_positive_country_use_papers,
+
+  n_positive_use_papers_with_matching_professor,
+
+  n_matching_participation_papers,
+
+  n_mixed_team_papers
+
+
+FROM
+  `foreign-phd.unitanalysis.fig5_revised_country`
+
+ORDER BY
+  degree_country_rank
+;
+
+
+
+-- =============================================================================
+-- 7. HARD VALIDATION
+-- =============================================================================
+
+SELECT
+
+  COUNT(*)
+    AS n_countries,
+
+
+  -- Panel A
+  COUNTIF(
+    authorship_share < 0
+    OR authorship_share > 1
+  )
+    AS invalid_authorship_share,
+
+
+  COUNTIF(
+    matching_knowledge_share < 0
+    OR matching_knowledge_share > 1
+  )
+    AS invalid_matching_knowledge_share,
+
+
+  -- Panel B
+  COUNTIF(
+    collaborative_gateway_share < 0
+    OR collaborative_gateway_share > 1
+  )
+    AS invalid_gateway_share,
+
+
+  MIN(
+    collaborative_gateway_share
+  )
+    AS min_gateway_share,
+
+  APPROX_QUANTILES(
+    collaborative_gateway_share,
+    100
+  )[OFFSET(25)]
+    AS p25_gateway_share,
+
+  APPROX_QUANTILES(
+    collaborative_gateway_share,
+    100
+  )[OFFSET(50)]
+    AS median_gateway_share,
+
+  APPROX_QUANTILES(
+    collaborative_gateway_share,
+    100
+  )[OFFSET(75)]
+    AS p75_gateway_share,
+
+  MAX(
+    collaborative_gateway_share
+  )
+    AS max_gateway_share,
+
+
+  -- Knowledge decomposition
+  MIN(
+    matching_knowledge_share
+    +
+    us_trained_share_country_knowledge
+    +
+    other_foreign_share_country_knowledge
+  )
+    AS min_knowledge_share_sum,
+
+  MAX(
+    matching_knowledge_share
+    +
+    us_trained_share_country_knowledge
+    +
+    other_foreign_share_country_knowledge
+  )
+    AS max_knowledge_share_sum,
+
+  COUNTIF(
+
+    ABS(
+
+      matching_knowledge_share
+      +
+      us_trained_share_country_knowledge
+      +
+      other_foreign_share_country_knowledge
+      -
+      1
+
+    ) > 0.000001
+
+  )
+    AS invalid_knowledge_share_sum
+
+FROM
+  `foreign-phd.unitanalysis.fig5_revised_country`
+;
+
+
+
+-- =============================================================================
+-- 8. COUNTRY RESULTS ORDERED FOR FIGURE B
+-- =============================================================================
+--
+-- Sort by the amount of country-specific knowledge carried into mixed teams,
+-- rather than by country population.
+-- =============================================================================
+
+SELECT
+
+  degree_country_rank,
+
+  country,
+
+  country_code,
+
+  n_matching_trained_professors,
+
+  n_matching_participation_papers,
+
+  n_mixed_team_papers,
+
+  100 * collaborative_gateway_share
+    AS collaborative_gateway_pct,
+
+  100 * mixed_team_share_of_all_country_knowledge
+    AS mixed_team_all_knowledge_pct
+
+FROM
+  `foreign-phd.unitanalysis.fig5_revised_country`
+
+ORDER BY
+  mixed_team_matching_knowledge DESC
+;
+
+
+
+-- =============================================================================
+-- 9. OPTIONAL: COUNTRY-LEVEL DECOMPOSITION FOR A STACKED BAR / DOT PLOT
+--
+-- For each training system:
+--
+--   matching-country knowledge
+--      |
+--      +-- mixed with U.S.-trained faculty
+--      |
+--      +-- matching-only teams
+--
+-- Plus all other country-specific knowledge.
+-- =============================================================================
+
+SELECT
+
+  degree_country_rank,
+
+  country,
+
+  country_code,
+
+  matching_country_knowledge,
+
+  mixed_team_matching_knowledge,
+
+  matching_country_knowledge
+    -
+  mixed_team_matching_knowledge
+    AS matching_only_team_knowledge,
+
+  total_country_knowledge
+    -
+  matching_country_knowledge
+    AS knowledge_without_matching_trained_faculty,
+
+  SAFE_DIVIDE(
+    mixed_team_matching_knowledge,
+    total_country_knowledge
+  )
+    AS mixed_team_share_of_total_country_knowledge,
+
+  SAFE_DIVIDE(
+    matching_country_knowledge
+      -
+    mixed_team_matching_knowledge,
+    total_country_knowledge
+  )
+    AS matching_only_share_of_total_country_knowledge
+
+FROM
+  `foreign-phd.unitanalysis.fig5_revised_country`
+
+ORDER BY
+  degree_country_rank
+;
