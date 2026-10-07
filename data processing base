@@ -1,0 +1,2275 @@
+-- =====================================================================
+-- =====================================================================
+-- GLOBAL DOCTORAL TRAINING AND KNOWLEDGE BROKERAGE
+-- MASTER BIGQUERY BUILD -- PNAS VERSION
+--
+-- DESIGN PRINCIPLES
+-- -----------------
+-- 1. Expensive OpenAlex scans are performed once.
+-- 2. Citation infrastructure remains country-agnostic.
+-- 3. Final analysis panel includes top 50 degree-country categories.
+-- 4. authorships_truncated is STORED, never used as a required filter.
+-- 5. Country completeness is measured empirically.
+-- 6. Both team-level and focal-AARC self-citations are identified.
+-- 7. Current target-country collaboration is separately identified.
+-- 8. Multiple definitions of country provenance are preserved.
+-- 9. Organizational variables needed for later spillovers are preserved.
+-- =====================================================================
+-- =====================================================================
+
+
+-- =====================================================================
+-- 0. RAW COUNTRY CROSSWALK
+--
+-- USSR intentionally receives NULL:
+-- it is not mapped to Russia.
+--
+-- "Korea" receives KR provisionally.
+-- Verify DegreeInstitutionName for these 42 faculty.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_country_crosswalk` AS
+
+SELECT 'United States' AS raw_country, 'United States' AS normalized_country, 'US' AS country_code UNION ALL
+
+SELECT 'United Kingdom', 'United Kingdom', 'GB' UNION ALL
+SELECT 'Canada', 'Canada', 'CA' UNION ALL
+SELECT 'Germany', 'Germany', 'DE' UNION ALL
+SELECT 'China', 'China', 'CN' UNION ALL
+SELECT 'India', 'India', 'IN' UNION ALL
+SELECT 'Russia', 'Russia', 'RU' UNION ALL
+SELECT 'France', 'France', 'FR' UNION ALL
+SELECT 'Australia', 'Australia', 'AU' UNION ALL
+SELECT 'Italy', 'Italy', 'IT' UNION ALL
+SELECT 'Japan', 'Japan', 'JP' UNION ALL
+SELECT 'Israel', 'Israel', 'IL' UNION ALL
+SELECT 'Switzerland', 'Switzerland', 'CH' UNION ALL
+SELECT 'Netherlands', 'Netherlands', 'NL' UNION ALL
+SELECT 'Spain', 'Spain', 'ES' UNION ALL
+SELECT 'Poland', 'Poland', 'PL' UNION ALL
+
+SELECT 'South Korea', 'South Korea', 'KR' UNION ALL
+SELECT 'Korea', 'South Korea', 'KR' UNION ALL
+
+SELECT 'Sweden', 'Sweden', 'SE' UNION ALL
+SELECT 'Argentina', 'Argentina', 'AR' UNION ALL
+SELECT 'Belgium', 'Belgium', 'BE' UNION ALL
+SELECT 'Austria', 'Austria', 'AT' UNION ALL
+SELECT 'Brazil', 'Brazil', 'BR' UNION ALL
+SELECT 'New Zealand', 'New Zealand', 'NZ' UNION ALL
+SELECT 'Ireland', 'Ireland', 'IE' UNION ALL
+SELECT 'South Africa', 'South Africa', 'ZA' UNION ALL
+SELECT 'Greece', 'Greece', 'GR' UNION ALL
+SELECT 'Denmark', 'Denmark', 'DK' UNION ALL
+SELECT 'Ukraine', 'Ukraine', 'UA' UNION ALL
+SELECT 'Singapore', 'Singapore', 'SG' UNION ALL
+SELECT 'Romania', 'Romania', 'RO' UNION ALL
+SELECT 'Hungary', 'Hungary', 'HU' UNION ALL
+SELECT 'Mexico', 'Mexico', 'MX' UNION ALL
+SELECT 'Iran', 'Iran', 'IR' UNION ALL
+SELECT 'Finland', 'Finland', 'FI' UNION ALL
+
+-- Encoding-corrupted AARC value
+SELECT 'TŸrkiye', 'Türkiye', 'TR' UNION ALL
+SELECT 'Türkiye', 'Türkiye', 'TR' UNION ALL
+SELECT 'Turkey', 'Türkiye', 'TR' UNION ALL
+
+SELECT 'Bulgaria', 'Bulgaria', 'BG' UNION ALL
+SELECT 'Egypt', 'Egypt', 'EG' UNION ALL
+SELECT 'Pakistan', 'Pakistan', 'PK' UNION ALL
+SELECT 'Taiwan', 'Taiwan', 'TW' UNION ALL
+SELECT 'Norway', 'Norway', 'NO' UNION ALL
+SELECT 'Colombia', 'Colombia', 'CO' UNION ALL
+SELECT 'Belarus', 'Belarus', 'BY' UNION ALL
+SELECT 'Chile', 'Chile', 'CL' UNION ALL
+SELECT 'Czech Republic', 'Czech Republic', 'CZ' UNION ALL
+SELECT 'Lebanon', 'Lebanon', 'LB' UNION ALL
+SELECT 'Portugal', 'Portugal', 'PT' UNION ALL
+SELECT 'Saint Kitts and Nevis', 'Saint Kitts and Nevis', 'KN' UNION ALL
+
+-- Do not incorrectly map USSR to Russia
+SELECT 'USSR', 'USSR', CAST(NULL AS STRING) UNION ALL
+
+SELECT 'Philippines', 'Philippines', 'PH' UNION ALL
+SELECT 'Nigeria', 'Nigeria', 'NG'
+;
+
+
+-- =====================================================================
+-- 1. NORMALIZED FACULTY SOURCE
+--
+-- Preserve raw and normalized country values.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_faculty_source` AS
+
+SELECT
+  f.*,
+
+  SAFE_CAST(
+    SUBSTR(f.AADVersion, 4, 4)
+    AS INT64
+  ) AS year,
+
+  f.Country AS degree_country_raw,
+
+  COALESCE(
+    x.normalized_country,
+    f.Country
+  ) AS degree_country,
+
+  x.country_code AS degree_country_code
+
+FROM
+  `foreign-phd.unitanalysis.facultyraw_enriched` f
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_country_crosswalk` x
+
+ON
+  f.Country = x.raw_country
+
+WHERE
+  SAFE_CAST(
+    SUBSTR(f.AADVersion, 4, 4)
+    AS INT64
+  ) BETWEEN 2011 AND 2020
+
+  AND f.author_id IS NOT NULL
+  AND f.confidence_tier IN ('High', 'Medium')
+  AND f.Country IS NOT NULL
+;
+
+
+-- =====================================================================
+-- 2. COUNTRY NORMALIZATION AUDIT
+--
+-- Inspect any unmapped country values before proceeding.
+-- =====================================================================
+
+SELECT
+  degree_country_raw,
+  degree_country,
+  degree_country_code,
+  COUNT(DISTINCT PersonId) AS n_faculty
+
+FROM
+  `foreign-phd.unitanalysis.broker2_faculty_source`
+
+GROUP BY
+  degree_country_raw,
+  degree_country,
+  degree_country_code
+
+ORDER BY
+  n_faculty DESC
+;
+
+
+-- =====================================================================
+-- 3. TOP 50 NORMALIZED FOREIGN DEGREE COUNTRIES
+--
+-- IMPORTANT:
+-- Korea and South Korea become one category here.
+--
+-- USSR remains rankable descriptively, but because its country_code
+-- is NULL it cannot enter same-current-country citation analysis.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_top50_degree_countries` AS
+
+WITH counts AS (
+
+  SELECT
+    degree_country,
+    degree_country_code,
+    COUNT(DISTINCT PersonId) AS n_faculty
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_faculty_source`
+
+  WHERE
+    degree_country != 'United States'
+
+  GROUP BY
+    degree_country,
+    degree_country_code
+),
+
+ranked AS (
+
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      ORDER BY n_faculty DESC, degree_country
+    ) AS degree_country_rank
+
+  FROM counts
+)
+
+SELECT *
+FROM ranked
+WHERE degree_country_rank <= 50
+;
+
+
+-- =====================================================================
+-- 4. ANALYZABLE TARGET COUNTRIES
+--
+-- Same-country knowledge alignment requires a current OpenAlex
+-- country code.
+--
+-- USSR therefore remains in the descriptive training geography
+-- but does not enter this target-country table.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_target_countries` AS
+
+SELECT
+  degree_country,
+  degree_country_code AS country_code,
+  n_faculty,
+  degree_country_rank
+
+FROM
+  `foreign-phd.unitanalysis.broker2_top50_degree_countries`
+
+WHERE
+  degree_country_code IS NOT NULL
+;
+
+
+-- =====================================================================
+-- 5. FULL FACULTY-YEAR DATA
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_faculty_year_full` AS
+
+SELECT DISTINCT
+
+  year,
+
+  PersonId,
+  PersonName,
+
+  author_id,
+
+  InstitutionId,
+  InstitutionName,
+
+  UnitId,
+  UnitName,
+
+  DegreeYear,
+  DegreeInstitutionName,
+  DegreeInstitutionID,
+
+  RankTypeId,
+  FacultyTitle,
+
+  Gender,
+
+  TaxonomyLevel01Name,
+  TaxonomyLevel01Id,
+
+  Umbrella,
+  Area,
+
+  degree_country_raw,
+  degree_country,
+  degree_country_code,
+
+  CCIHE_unitid,
+  CCIHE_instnm,
+  CCIHE_city,
+  CCIHE_stabbr,
+  CCIHE_ic2025,
+  CCIHE_ic2025name,
+  CCIHE_research2025,
+  CCIHE_research2025name,
+
+  match_score,
+  delta_score,
+  confidence_tier
+
+FROM
+  `foreign-phd.unitanalysis.broker2_faculty_source`
+;
+
+
+-- =====================================================================
+-- 6. FACULTY-YEAR CORE
+--
+-- One faculty record per PersonId-year.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_faculty_year_core` AS
+
+SELECT
+
+  year,
+  PersonId,
+
+  ANY_VALUE(PersonName) AS PersonName,
+  ANY_VALUE(author_id) AS author_id,
+
+  ANY_VALUE(InstitutionId) AS InstitutionId,
+  ANY_VALUE(InstitutionName) AS InstitutionName,
+
+  ANY_VALUE(DegreeYear) AS DegreeYear,
+  ANY_VALUE(DegreeInstitutionName) AS DegreeInstitutionName,
+  ANY_VALUE(DegreeInstitutionID) AS DegreeInstitutionID,
+
+  ANY_VALUE(RankTypeId) AS RankTypeId,
+  ANY_VALUE(FacultyTitle) AS FacultyTitle,
+
+  ANY_VALUE(Gender) AS Gender,
+
+  ANY_VALUE(degree_country_raw) AS degree_country_raw,
+  ANY_VALUE(degree_country) AS degree_country,
+  ANY_VALUE(degree_country_code) AS degree_country_code,
+
+  ANY_VALUE(CCIHE_research2025)
+    AS CCIHE_research2025,
+
+  ANY_VALUE(CCIHE_research2025name)
+    AS CCIHE_research2025name,
+
+  ANY_VALUE(confidence_tier)
+    AS confidence_tier,
+
+  MAX(match_score)
+    AS match_score,
+
+  MAX(delta_score)
+    AS delta_score
+
+FROM
+  `foreign-phd.unitanalysis.broker2_faculty_year_full`
+
+GROUP BY
+  year,
+  PersonId
+;
+
+
+-- =====================================================================
+-- 7. FACULTY-YEAR ORGANIZATIONAL MEMBERSHIP
+--
+-- Preserve all units/disciplines for later departmental spillovers.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_faculty_year_units` AS
+
+SELECT DISTINCT
+
+  year,
+
+  PersonId,
+  author_id,
+
+  InstitutionId,
+  InstitutionName,
+
+  UnitId,
+  UnitName,
+
+  TaxonomyLevel01Id,
+  TaxonomyLevel01Name,
+
+  Umbrella,
+  Area,
+
+  degree_country,
+  degree_country_code
+
+FROM
+  `foreign-phd.unitanalysis.broker2_faculty_year_full`
+;
+
+
+-- =====================================================================
+-- 8. AARC FACULTY-PAPER SPINE
+--
+-- Contemporaneous linkage:
+-- publication year == AARC roster year.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_aarc_paper_authors` AS
+
+SELECT DISTINCT
+
+  w.id AS work_id,
+  w.publication_year,
+
+  fy.PersonId,
+  fy.PersonName,
+  fy.author_id,
+
+  fy.InstitutionId,
+  fy.InstitutionName,
+
+  fy.DegreeYear,
+  fy.DegreeInstitutionName,
+  fy.DegreeInstitutionID,
+
+  fy.RankTypeId,
+  fy.FacultyTitle,
+
+  fy.degree_country,
+  fy.degree_country_code,
+
+  fy.CCIHE_research2025,
+  fy.CCIHE_research2025name,
+
+  fy.confidence_tier,
+  fy.match_score,
+  fy.delta_score,
+
+  a.author_position,
+  a.is_corresponding,
+
+  ARRAY_LENGTH(a.countries)
+    AS oa_n_current_countries,
+
+  a.countries
+    AS oa_current_countries
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+CROSS JOIN
+  UNNEST(w.authorships) a
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_faculty_year_core` fy
+
+ON
+  a.author.id = fy.author_id
+  AND w.publication_year = fy.year
+
+WHERE
+  w.publication_year BETWEEN 2011 AND 2020
+  AND a.author.id IS NOT NULL
+;
+
+
+-- =====================================================================
+-- 9. PAPER-LEVEL AARC COMPOSITION
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_paper_aarc_summary` AS
+
+SELECT
+
+  work_id,
+  publication_year,
+
+  COUNT(DISTINCT PersonId)
+    AS n_aarc_faculty,
+
+  COUNT(DISTINCT CASE
+    WHEN degree_country = 'United States'
+    THEN PersonId
+  END) AS n_aarc_us_degree,
+
+  COUNT(DISTINCT CASE
+    WHEN degree_country != 'United States'
+    THEN PersonId
+  END) AS n_aarc_foreign_degree,
+
+  COUNT(DISTINCT degree_country)
+    AS n_aarc_degree_countries,
+
+  COUNT(DISTINCT CASE
+    WHEN degree_country != 'United States'
+    THEN degree_country
+  END) AS n_foreign_degree_countries,
+
+  MAX(CASE
+    WHEN degree_country != 'United States'
+    THEN 1 ELSE 0
+  END) AS has_foreign_degree_aarc,
+
+  MAX(CASE
+    WHEN degree_country = 'United States'
+    THEN 1 ELSE 0
+  END) AS has_us_degree_aarc,
+
+  MAX(CASE
+    WHEN degree_country != 'United States'
+         AND is_corresponding
+    THEN 1 ELSE 0
+  END) AS has_foreign_degree_corresponding_aarc,
+
+  MAX(CASE
+    WHEN degree_country = 'United States'
+         AND is_corresponding
+    THEN 1 ELSE 0
+  END) AS has_us_degree_corresponding_aarc
+
+FROM
+  `foreign-phd.unitanalysis.broker2_aarc_paper_authors`
+
+GROUP BY
+  work_id,
+  publication_year
+;
+
+
+-- =====================================================================
+-- 10. FOCAL PAPER MASTER
+--
+-- Store authorships_truncated diagnostically, but DO NOT filter on it.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_focal_papers` AS
+
+SELECT
+
+  w.id AS work_id,
+
+  w.publication_year,
+  w.publication_date,
+
+  w.title,
+  w.doi,
+  w.language,
+
+  w.authors_count,
+
+  ARRAY_LENGTH(w.authorships)
+    AS oa_authorship_records,
+
+  SAFE_DIVIDE(
+    ARRAY_LENGTH(w.authorships),
+    w.authors_count
+  ) AS authorship_record_coverage,
+
+  w.authorships_truncated,
+
+  w.institutions_distinct_count,
+  w.countries_distinct_count,
+
+  w.referenced_works_count,
+
+  ARRAY_LENGTH(w.referenced_works)
+    AS oa_reference_array_count,
+
+  w.fwci,
+
+  w.citation_normalized_percentile.value
+    AS citation_percentile,
+
+  w.citation_normalized_percentile.is_in_top_1_percent
+    AS is_top1,
+
+  w.citation_normalized_percentile.is_in_top_10_percent
+    AS is_top10,
+
+  w.primary_topic.id
+    AS topic_id,
+
+  w.primary_topic.display_name
+    AS topic_name,
+
+  w.primary_topic.subfield.id
+    AS subfield_id,
+
+  w.primary_topic.subfield.display_name
+    AS subfield_name,
+
+  w.primary_topic.field.id
+    AS field_id,
+
+  w.primary_topic.field.display_name
+    AS field_name,
+
+  w.primary_topic.domain.id
+    AS domain_id,
+
+  w.primary_topic.domain.display_name
+    AS domain_name,
+
+  w.primary_location.source.id
+    AS source_id,
+
+  w.primary_location.source.display_name
+    AS source_name,
+
+  s.n_aarc_faculty,
+  s.n_aarc_us_degree,
+  s.n_aarc_foreign_degree,
+
+  s.n_aarc_degree_countries,
+  s.n_foreign_degree_countries,
+
+  s.has_foreign_degree_aarc,
+  s.has_us_degree_aarc,
+
+  s.has_foreign_degree_corresponding_aarc,
+  s.has_us_degree_corresponding_aarc
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_paper_aarc_summary` s
+
+ON
+  w.id = s.work_id
+
+WHERE
+  w.publication_year BETWEEN 2011 AND 2020
+;
+
+
+-- =====================================================================
+-- 11. CURRENT AFFILIATION COUNTRIES OF ALL CITING AUTHORS
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_citing_author_countries` AS
+
+SELECT DISTINCT
+
+  w.id AS work_id,
+
+  a.author.id AS author_id,
+
+  country_code,
+
+  a.author_position,
+  a.is_corresponding,
+
+  CASE
+    WHEN ap.author_id IS NOT NULL
+    THEN 1 ELSE 0
+  END AS is_aarc_author,
+
+  ap.degree_country AS aarc_degree_country,
+  ap.degree_country_code AS aarc_degree_country_code
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_focal_papers` fp
+
+ON
+  w.id = fp.work_id
+
+CROSS JOIN
+  UNNEST(w.authorships) a
+
+CROSS JOIN
+  UNNEST(a.countries) country_code
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_aarc_paper_authors` ap
+
+ON
+  w.id = ap.work_id
+  AND a.author.id = ap.author_id
+
+WHERE
+  a.author.id IS NOT NULL
+  AND country_code IS NOT NULL
+  AND country_code != ''
+;
+
+
+-- =====================================================================
+-- 12. CITING TEAM COUNTRY COVERAGE
+--
+-- Two coverage denominators are retained:
+-- reported authors_count
+-- observed authorship-record count
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_citing_country_summary` AS
+
+WITH mapped AS (
+
+  SELECT
+
+    w.id AS work_id,
+
+    COUNT(DISTINCT a.author.id)
+      AS n_authors_with_country,
+
+    COUNT(DISTINCT country_code)
+      AS n_current_countries,
+
+    MAX(CASE
+      WHEN country_code = 'US'
+      THEN 1 ELSE 0
+    END) AS has_us_current_affiliation,
+
+    MAX(CASE
+      WHEN country_code != 'US'
+      THEN 1 ELSE 0
+    END) AS has_nonus_current_affiliation
+
+  FROM
+    `subugoe-collaborative.openalex_walden.works` w
+
+  JOIN
+    `foreign-phd.unitanalysis.broker2_focal_papers` fp
+
+  ON
+    w.id = fp.work_id
+
+  CROSS JOIN
+    UNNEST(w.authorships) a
+
+  CROSS JOIN
+    UNNEST(a.countries) country_code
+
+  WHERE
+    a.author.id IS NOT NULL
+    AND country_code IS NOT NULL
+    AND country_code != ''
+
+  GROUP BY
+    w.id
+)
+
+SELECT
+
+  fp.work_id,
+
+  fp.authors_count,
+  fp.oa_authorship_records,
+
+  COALESCE(m.n_authors_with_country, 0)
+    AS n_authors_with_country,
+
+  SAFE_DIVIDE(
+    COALESCE(m.n_authors_with_country, 0),
+    fp.authors_count
+  ) AS citing_country_coverage_reported,
+
+  SAFE_DIVIDE(
+    COALESCE(m.n_authors_with_country, 0),
+    fp.oa_authorship_records
+  ) AS citing_country_coverage_observed,
+
+  COALESCE(m.n_current_countries, 0)
+    AS n_current_countries,
+
+  COALESCE(m.has_us_current_affiliation, 0)
+    AS has_us_current_affiliation,
+
+  COALESCE(m.has_nonus_current_affiliation, 0)
+    AS has_nonus_current_affiliation,
+
+  CASE
+    WHEN m.n_current_countries = 1
+         AND m.has_us_current_affiliation = 1
+    THEN 1 ELSE 0
+  END AS current_team_us_only
+
+FROM
+  `foreign-phd.unitanalysis.broker2_focal_papers` fp
+
+LEFT JOIN mapped m
+USING (work_id)
+;
+
+
+-- =====================================================================
+-- 13. UNIQUE CITATION EDGES
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_citation_edges_base` AS
+
+SELECT DISTINCT
+
+  w.id AS citing_work_id,
+
+  w.publication_year AS citing_year,
+
+  cited_work_id
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_focal_papers` fp
+
+ON
+  w.id = fp.work_id
+
+CROSS JOIN
+  UNNEST(w.referenced_works) cited_work_id
+
+WHERE
+  cited_work_id IS NOT NULL
+;
+
+
+-- =====================================================================
+-- 14. CITED-WORK MASTER
+--
+-- No truncation filtering.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_cited_work_master` AS
+
+WITH ids AS (
+
+  SELECT DISTINCT cited_work_id
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_citation_edges_base`
+)
+
+SELECT
+
+  w.id AS cited_work_id,
+
+  w.publication_year AS cited_year,
+  w.publication_date AS cited_date,
+
+  w.doi AS cited_doi,
+  w.language AS cited_language,
+
+  w.authors_count
+    AS cited_authors_count,
+
+  ARRAY_LENGTH(w.authorships)
+    AS cited_authorship_records,
+
+  SAFE_DIVIDE(
+    ARRAY_LENGTH(w.authorships),
+    w.authors_count
+  ) AS cited_authorship_record_coverage,
+
+  w.authorships_truncated
+    AS cited_authorships_truncated,
+
+  w.countries_distinct_count
+    AS cited_countries_distinct_count,
+
+  w.institutions_distinct_count
+    AS cited_institutions_distinct_count,
+
+  w.cited_by_count,
+
+  w.fwci
+    AS cited_fwci,
+
+  w.citation_normalized_percentile.value
+    AS cited_percentile,
+
+  w.primary_topic.id
+    AS cited_topic_id,
+
+  w.primary_topic.display_name
+    AS cited_topic_name,
+
+  w.primary_topic.subfield.id
+    AS cited_subfield_id,
+
+  w.primary_topic.subfield.display_name
+    AS cited_subfield_name,
+
+  w.primary_topic.field.id
+    AS cited_field_id,
+
+  w.primary_topic.field.display_name
+    AS cited_field_name,
+
+  w.primary_topic.domain.id
+    AS cited_domain_id,
+
+  w.primary_topic.domain.display_name
+    AS cited_domain_name,
+
+  w.primary_location.source.id
+    AS cited_source_id,
+
+  w.primary_location.source.display_name
+    AS cited_source_name
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+JOIN ids
+ON
+  w.id = ids.cited_work_id
+;
+
+
+-- =====================================================================
+-- 15. CITED-WORK AUTHOR COUNTRY DATA
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_cited_author_country` AS
+
+SELECT DISTINCT
+
+  w.id AS cited_work_id,
+
+  a.author.id AS author_id,
+
+  country_code
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_cited_work_master` cm
+
+ON
+  w.id = cm.cited_work_id
+
+CROSS JOIN
+  UNNEST(w.authorships) a
+
+CROSS JOIN
+  UNNEST(a.countries) country_code
+
+WHERE
+  a.author.id IS NOT NULL
+  AND country_code IS NOT NULL
+  AND country_code != ''
+;
+
+
+-- =====================================================================
+-- 16. CITED WORK COUNTRY COVERAGE
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_cited_country_coverage` AS
+
+WITH mapped AS (
+
+  SELECT
+
+    cited_work_id,
+
+    COUNT(DISTINCT author_id)
+      AS n_authors_with_country
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_cited_author_country`
+
+  GROUP BY
+    cited_work_id
+)
+
+SELECT
+
+  cm.cited_work_id,
+
+  cm.cited_authors_count,
+  cm.cited_authorship_records,
+
+  COALESCE(m.n_authors_with_country, 0)
+    AS n_authors_with_country,
+
+  SAFE_DIVIDE(
+    COALESCE(m.n_authors_with_country, 0),
+    cm.cited_authors_count
+  ) AS cited_country_coverage_reported,
+
+  SAFE_DIVIDE(
+    COALESCE(m.n_authors_with_country, 0),
+    cm.cited_authorship_records
+  ) AS cited_country_coverage_observed,
+
+  cm.cited_authorship_record_coverage,
+
+  cm.cited_authorships_truncated,
+
+  CASE
+    WHEN COALESCE(m.n_authors_with_country, 0) = 0
+    THEN 1 ELSE 0
+  END AS no_author_country_data
+
+FROM
+  `foreign-phd.unitanalysis.broker2_cited_work_master` cm
+
+LEFT JOIN mapped m
+USING (cited_work_id)
+;
+
+
+-- =====================================================================
+-- 17. AUTHOR-FRACTIONAL CITED-WORK COUNTRY WEIGHTS
+--
+-- Each mapped author gets equal weight.
+-- A multi-country author's weight is split across their countries.
+--
+-- We normalize among authors for whom country data are available.
+-- Completeness is retained separately in coverage variables.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_cited_work_country` AS
+
+WITH author_ncountries AS (
+
+  SELECT
+
+    cited_work_id,
+    author_id,
+
+    COUNT(DISTINCT country_code)
+      AS n_author_countries
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_cited_author_country`
+
+  GROUP BY
+    cited_work_id,
+    author_id
+),
+
+work_nauthors AS (
+
+  SELECT
+
+    cited_work_id,
+
+    COUNT(DISTINCT author_id)
+      AS n_mapped_authors
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_cited_author_country`
+
+  GROUP BY
+    cited_work_id
+),
+
+fractional AS (
+
+  SELECT
+
+    ac.cited_work_id,
+    ac.author_id,
+    ac.country_code,
+
+    SAFE_DIVIDE(
+      1.0,
+      wa.n_mapped_authors * nc.n_author_countries
+    ) AS contribution
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_cited_author_country` ac
+
+  JOIN author_ncountries nc
+  USING (cited_work_id, author_id)
+
+  JOIN work_nauthors wa
+  USING (cited_work_id)
+),
+
+country_sum AS (
+
+  SELECT
+
+    cited_work_id,
+    country_code,
+
+    SUM(contribution)
+      AS country_weight
+
+  FROM fractional
+
+  GROUP BY
+    cited_work_id,
+    country_code
+),
+
+work_flags AS (
+
+  SELECT
+
+    cited_work_id,
+
+    MAX(CASE
+      WHEN country_code = 'US'
+      THEN 1 ELSE 0
+    END) AS has_us_country,
+
+    COUNT(*)
+      AS n_mapped_countries
+
+  FROM country_sum
+
+  GROUP BY cited_work_id
+)
+
+SELECT
+
+  cs.cited_work_id,
+
+  cs.country_code,
+
+  cs.country_weight,
+
+  wf.has_us_country,
+
+  wf.n_mapped_countries,
+
+  CASE
+    WHEN cs.country_weight > 0
+    THEN 1 ELSE 0
+  END AS any_country_presence,
+
+  CASE
+    WHEN cs.country_weight >= 0.25
+    THEN 1 ELSE 0
+  END AS country_presence_25,
+
+  CASE
+    WHEN cs.country_weight > 0.50
+    THEN 1 ELSE 0
+  END AS country_majority,
+
+  CASE
+    WHEN ABS(cs.country_weight - 1.0) < 0.000001
+    THEN 1 ELSE 0
+  END AS country_exclusive,
+
+  CASE
+    WHEN wf.n_mapped_countries = 1
+    THEN 1 ELSE 0
+  END AS single_country_work
+
+FROM
+  country_sum cs
+
+JOIN
+  work_flags wf
+USING (cited_work_id)
+;
+
+
+-- =====================================================================
+-- 18. CITING AUTHORS FOR SELF-CITATION DETECTION
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_citing_authors` AS
+
+SELECT DISTINCT
+
+  w.id AS citing_work_id,
+
+  a.author.id AS author_id
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_focal_papers` fp
+
+ON
+  w.id = fp.work_id
+
+CROSS JOIN
+  UNNEST(w.authorships) a
+
+WHERE
+  a.author.id IS NOT NULL
+  AND a.author.id != ''
+;
+
+
+-- =====================================================================
+-- 19. CITED AUTHORS FOR SELF-CITATION DETECTION
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_cited_authors` AS
+
+SELECT DISTINCT
+
+  w.id AS cited_work_id,
+
+  a.author.id AS author_id
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_cited_work_master` cm
+
+ON
+  w.id = cm.cited_work_id
+
+CROSS JOIN
+  UNNEST(w.authorships) a
+
+WHERE
+  a.author.id IS NOT NULL
+  AND a.author.id != ''
+;
+
+
+-- =====================================================================
+-- 20. TEAM SELF-CITATION
+--
+-- Any author overlaps between citing and cited paper.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_team_selfcite_edges` AS
+
+SELECT DISTINCT
+
+  e.citing_work_id,
+  e.cited_work_id
+
+FROM
+  `foreign-phd.unitanalysis.broker2_citation_edges_base` e
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_citing_authors` ca
+
+ON
+  e.citing_work_id = ca.citing_work_id
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_cited_authors` da
+
+ON
+  e.cited_work_id = da.cited_work_id
+  AND ca.author_id = da.author_id
+;
+
+
+-- =====================================================================
+-- 21. AARC-FOCAL SELF-CITATION
+--
+-- AARC faculty on citing paper also authored cited paper.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_aarc_selfcite_edges` AS
+
+SELECT DISTINCT
+
+  e.citing_work_id,
+  e.cited_work_id
+
+FROM
+  `foreign-phd.unitanalysis.broker2_citation_edges_base` e
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_aarc_paper_authors` ap
+
+ON
+  e.citing_work_id = ap.work_id
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_cited_authors` da
+
+ON
+  e.cited_work_id = da.cited_work_id
+  AND ap.author_id = da.author_id
+;
+
+
+-- =====================================================================
+-- 22. ENRICHED CITATION EDGES
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_citation_edges` AS
+
+SELECT
+
+  e.citing_work_id,
+  e.citing_year,
+  e.cited_work_id,
+
+  cm.cited_year,
+
+  e.citing_year - cm.cited_year
+    AS cited_work_age,
+
+  cm.cited_authors_count,
+  cm.cited_authorship_records,
+  cm.cited_authorship_record_coverage,
+  cm.cited_authorships_truncated,
+
+  cm.cited_countries_distinct_count,
+  cm.cited_institutions_distinct_count,
+
+  cm.cited_by_count,
+  cm.cited_fwci,
+  cm.cited_percentile,
+
+  cm.cited_topic_id,
+  cm.cited_subfield_id,
+  cm.cited_field_id,
+  cm.cited_domain_id,
+  cm.cited_source_id,
+
+  cov.cited_country_coverage_reported,
+  cov.cited_country_coverage_observed,
+
+  CASE
+    WHEN ts.cited_work_id IS NOT NULL
+    THEN 1 ELSE 0
+  END AS team_self_citation,
+
+  CASE
+    WHEN ars.cited_work_id IS NOT NULL
+    THEN 1 ELSE 0
+  END AS aarc_self_citation
+
+FROM
+  `foreign-phd.unitanalysis.broker2_citation_edges_base` e
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_cited_work_master` cm
+
+ON
+  e.cited_work_id = cm.cited_work_id
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_cited_country_coverage` cov
+
+ON
+  e.cited_work_id = cov.cited_work_id
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_team_selfcite_edges` ts
+
+ON
+  e.citing_work_id = ts.citing_work_id
+  AND e.cited_work_id = ts.cited_work_id
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_aarc_selfcite_edges` ars
+
+ON
+  e.citing_work_id = ars.citing_work_id
+  AND e.cited_work_id = ars.cited_work_id
+;
+
+
+-- =====================================================================
+-- 23. PAPER x TARGET DEGREE COUNTRY EXPOSURE
+--
+-- This cross-join occurs only at the PAPER level, not citation level.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_paper_country_exposure50` AS
+
+SELECT
+
+  fp.work_id,
+  fp.publication_year,
+
+  tc.degree_country,
+  tc.country_code,
+
+  tc.n_faculty AS degree_country_faculty_n,
+
+  tc.degree_country_rank,
+
+  COUNT(DISTINCT CASE
+    WHEN ap.degree_country = tc.degree_country
+    THEN ap.PersonId
+  END) AS n_matching_degree_aarc,
+
+  CASE
+    WHEN COUNT(DISTINCT CASE
+      WHEN ap.degree_country = tc.degree_country
+      THEN ap.PersonId
+    END) > 0
+    THEN 1 ELSE 0
+  END AS has_matching_degree_author,
+
+  MAX(CASE
+    WHEN ap.degree_country = tc.degree_country
+         AND ap.is_corresponding
+    THEN 1 ELSE 0
+  END) AS matching_degree_corresponding,
+
+  MAX(CASE
+    WHEN ap.degree_country = tc.degree_country
+         AND ap.author_position = 'first'
+    THEN 1 ELSE 0
+  END) AS matching_degree_first_author,
+
+  MAX(CASE
+    WHEN ap.degree_country = tc.degree_country
+         AND ap.author_position = 'last'
+    THEN 1 ELSE 0
+  END) AS matching_degree_last_author
+
+FROM
+  `foreign-phd.unitanalysis.broker2_focal_papers` fp
+
+CROSS JOIN
+  `foreign-phd.unitanalysis.broker2_target_countries` tc
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_aarc_paper_authors` ap
+
+ON
+  fp.work_id = ap.work_id
+
+GROUP BY
+
+  fp.work_id,
+  fp.publication_year,
+
+  tc.degree_country,
+  tc.country_code,
+
+  tc.n_faculty,
+  tc.degree_country_rank
+;
+
+
+-- =====================================================================
+-- 24. CURRENT TARGET-COUNTRY COLLABORATION
+--
+-- Distinguishes training imprint from active international collaboration.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_current_country_exposure50` AS
+
+SELECT
+
+  pc.work_id,
+  pc.degree_country,
+  pc.country_code,
+
+  MAX(CASE
+    WHEN cac.country_code = pc.country_code
+    THEN 1 ELSE 0
+  END) AS any_current_target_country,
+
+  MAX(CASE
+    WHEN cac.country_code = pc.country_code
+         AND cac.is_aarc_author = 0
+    THEN 1 ELSE 0
+  END) AS nonaarc_current_target_country,
+
+  MAX(CASE
+    WHEN cac.country_code = pc.country_code
+
+         AND NOT (
+           cac.is_aarc_author = 1
+           AND cac.aarc_degree_country = pc.degree_country
+         )
+
+    THEN 1 ELSE 0
+  END) AS other_coauthor_current_target_country,
+
+  MAX(CASE
+    WHEN cac.country_code = pc.country_code
+         AND cac.is_corresponding
+    THEN 1 ELSE 0
+  END) AS corresponding_current_target_country
+
+FROM
+  `foreign-phd.unitanalysis.broker2_paper_country_exposure50` pc
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_citing_author_countries` cac
+
+ON
+  pc.work_id = cac.work_id
+
+GROUP BY
+  pc.work_id,
+  pc.degree_country,
+  pc.country_code
+;
+
+
+-- =====================================================================
+-- 25. PAPER x CITED COUNTRY AGGREGATION
+--
+-- Still all countries, not merely the top 50.
+--
+-- This is valuable for the later 50x50 placebo matrix.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_paper_cited_country` AS
+
+SELECT
+
+  e.citing_work_id AS work_id,
+
+  cw.country_code AS cited_country_code,
+
+
+  -- Fractional provenance
+  SUM(cw.country_weight)
+    AS country_mass,
+
+
+  -- Alternative country definitions
+  SUM(cw.any_country_presence)
+    AS country_any_count,
+
+  SUM(cw.country_presence_25)
+    AS country_25_count,
+
+  SUM(cw.country_majority)
+    AS country_majority_count,
+
+  SUM(cw.country_exclusive)
+    AS country_exclusive_count,
+
+
+  -- Non-U.S.-co-produced cited works
+  SUM(CASE
+    WHEN cw.has_us_country = 0
+    THEN cw.country_weight
+    ELSE 0
+  END) AS country_mass_nonus,
+
+
+  -- Team self-citations excluded
+  SUM(CASE
+    WHEN e.team_self_citation = 0
+    THEN cw.country_weight
+    ELSE 0
+  END) AS country_mass_no_team_self,
+
+
+  -- AARC focal self-citations excluded
+  SUM(CASE
+    WHEN e.aarc_self_citation = 0
+    THEN cw.country_weight
+    ELSE 0
+  END) AS country_mass_no_aarc_self,
+
+
+  -- No-US AND team-self excluded simultaneously
+  SUM(CASE
+    WHEN cw.has_us_country = 0
+         AND e.team_self_citation = 0
+    THEN cw.country_weight
+    ELSE 0
+  END) AS country_mass_nonus_no_team_self,
+
+
+  -- High country coverage
+  SUM(CASE
+    WHEN e.cited_country_coverage_observed >= 0.80
+    THEN cw.country_weight
+    ELSE 0
+  END) AS country_mass_cov80,
+
+
+  SUM(CASE
+    WHEN e.cited_country_coverage_observed >= 0.95
+    THEN cw.country_weight
+    ELSE 0
+  END) AS country_mass_cov95
+
+FROM
+  `foreign-phd.unitanalysis.broker2_citation_edges` e
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_cited_work_country` cw
+
+ON
+  e.cited_work_id = cw.cited_work_id
+
+GROUP BY
+  work_id,
+  cited_country_code
+;
+
+
+-- =====================================================================
+-- 26. PAPER REFERENCE DENOMINATORS
+--
+-- Denominators corresponding to the alternative numerators above.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_paper_reference_summary` AS
+
+SELECT
+
+  e.citing_work_id AS work_id,
+
+  COUNT(*) AS n_reference_edges,
+
+
+  -- References for which at least some country data exist
+  COUNTIF(
+    e.cited_country_coverage_observed > 0
+  ) AS n_refs_with_country,
+
+
+  SAFE_DIVIDE(
+    COUNTIF(e.cited_country_coverage_observed > 0),
+    COUNT(*)
+  ) AS reference_country_coverage,
+
+
+  -- No-US reference denominator
+  COUNTIF(
+    e.cited_country_coverage_observed > 0
+    AND NOT EXISTS (
+      SELECT 1
+      FROM
+        `foreign-phd.unitanalysis.broker2_cited_work_country` cw2
+      WHERE
+        cw2.cited_work_id = e.cited_work_id
+        AND cw2.country_code = 'US'
+    )
+  ) AS n_refs_nonus,
+
+
+  -- Self-citation counts
+  COUNTIF(
+    e.team_self_citation = 1
+  ) AS n_team_selfcitations,
+
+  COUNTIF(
+    e.aarc_self_citation = 1
+  ) AS n_aarc_selfcitations,
+
+
+  -- Valid-reference denominators after self-citation removal
+  COUNTIF(
+    e.team_self_citation = 0
+    AND e.cited_country_coverage_observed > 0
+  ) AS n_refs_country_no_team_self,
+
+  COUNTIF(
+    e.aarc_self_citation = 0
+    AND e.cited_country_coverage_observed > 0
+  ) AS n_refs_country_no_aarc_self,
+
+
+  -- No-US plus no-team-self denominator
+  COUNTIF(
+    e.team_self_citation = 0
+    AND e.cited_country_coverage_observed > 0
+    AND NOT EXISTS (
+      SELECT 1
+      FROM
+        `foreign-phd.unitanalysis.broker2_cited_work_country` cw3
+      WHERE
+        cw3.cited_work_id = e.cited_work_id
+        AND cw3.country_code = 'US'
+    )
+  ) AS n_refs_nonus_no_team_self,
+
+
+  -- High-completeness denominators
+  COUNTIF(
+    e.cited_country_coverage_observed >= 0.80
+  ) AS n_refs_cov80,
+
+  COUNTIF(
+    e.cited_country_coverage_observed >= 0.95
+  ) AS n_refs_cov95,
+
+
+  -- Reference-list characteristics
+  AVG(e.cited_work_age)
+    AS mean_reference_age,
+
+  AVG(e.cited_fwci)
+    AS mean_cited_fwci,
+
+  AVG(e.cited_by_count)
+    AS mean_cited_global_citations
+
+FROM
+  `foreign-phd.unitanalysis.broker2_citation_edges` e
+
+GROUP BY
+  work_id
+;
+
+
+-- =====================================================================
+-- 27. FINAL PAPER x TARGET COUNTRY MASTER TABLE
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_paper_country50` AS
+
+SELECT
+
+  pc.work_id,
+
+  fp.publication_year,
+
+  pc.degree_country
+    AS target_degree_country,
+
+  pc.country_code
+    AS target_country_code,
+
+  pc.degree_country_rank,
+  pc.degree_country_faculty_n,
+
+
+  -- =========================================================
+  -- DEGREE-COUNTRY EXPOSURE
+  -- =========================================================
+
+  pc.has_matching_degree_author,
+  pc.n_matching_degree_aarc,
+
+  pc.matching_degree_corresponding,
+  pc.matching_degree_first_author,
+  pc.matching_degree_last_author,
+
+
+  -- =========================================================
+  -- CURRENT INTERNATIONAL COLLABORATION
+  -- =========================================================
+
+  COALESCE(cur.any_current_target_country, 0)
+    AS any_current_target_country,
+
+  COALESCE(cur.nonaarc_current_target_country, 0)
+    AS nonaarc_current_target_country,
+
+  COALESCE(cur.other_coauthor_current_target_country, 0)
+    AS other_coauthor_current_target_country,
+
+  COALESCE(cur.corresponding_current_target_country, 0)
+    AS corresponding_current_target_country,
+
+
+  -- =========================================================
+  -- CITING-PAPER TEAM
+  -- =========================================================
+
+  fp.authors_count,
+  fp.oa_authorship_records,
+  fp.authorship_record_coverage,
+
+  -- Diagnostic only
+  fp.authorships_truncated,
+
+  fp.n_aarc_faculty,
+  fp.n_aarc_us_degree,
+  fp.n_aarc_foreign_degree,
+
+  fp.n_aarc_degree_countries,
+  fp.n_foreign_degree_countries,
+
+  cs.n_authors_with_country
+    AS citing_n_authors_with_country,
+
+  cs.citing_country_coverage_reported,
+  cs.citing_country_coverage_observed,
+
+  cs.n_current_countries,
+
+  cs.has_us_current_affiliation,
+  cs.has_nonus_current_affiliation,
+
+  cs.current_team_us_only,
+
+
+  -- =========================================================
+  -- REFERENCE COVERAGE
+  -- =========================================================
+
+  rs.n_reference_edges,
+
+  rs.n_refs_with_country,
+
+  rs.reference_country_coverage,
+
+  rs.n_refs_nonus,
+
+  rs.n_team_selfcitations,
+  rs.n_aarc_selfcitations,
+
+  SAFE_DIVIDE(
+    rs.n_team_selfcitations,
+    rs.n_reference_edges
+  ) AS team_selfcitation_share,
+
+  SAFE_DIVIDE(
+    rs.n_aarc_selfcitations,
+    rs.n_reference_edges
+  ) AS aarc_selfcitation_share,
+
+
+  -- =========================================================
+  -- TARGET-COUNTRY FRACTIONAL MASSES
+  -- =========================================================
+
+  COALESCE(cc.country_mass, 0)
+    AS target_country_mass,
+
+  COALESCE(cc.country_mass_nonus, 0)
+    AS target_country_mass_nonus,
+
+  COALESCE(cc.country_mass_no_team_self, 0)
+    AS target_country_mass_no_team_self,
+
+  COALESCE(cc.country_mass_no_aarc_self, 0)
+    AS target_country_mass_no_aarc_self,
+
+  COALESCE(cc.country_mass_nonus_no_team_self, 0)
+    AS target_country_mass_nonus_no_team_self,
+
+  COALESCE(cc.country_mass_cov80, 0)
+    AS target_country_mass_cov80,
+
+  COALESCE(cc.country_mass_cov95, 0)
+    AS target_country_mass_cov95,
+
+
+  -- =========================================================
+  -- ALTERNATIVE COUNTRY PROVENANCE DEFINITIONS
+  -- =========================================================
+
+  COALESCE(cc.country_any_count, 0)
+    AS target_country_any_count,
+
+  COALESCE(cc.country_25_count, 0)
+    AS target_country_25_count,
+
+  COALESCE(cc.country_majority_count, 0)
+    AS target_country_majority_count,
+
+  COALESCE(cc.country_exclusive_count, 0)
+    AS target_country_exclusive_count,
+
+
+  -- =========================================================
+  -- PRIMARY SHARES
+  -- =========================================================
+
+  SAFE_DIVIDE(
+    COALESCE(cc.country_mass, 0),
+    rs.n_refs_with_country
+  ) AS target_country_share,
+
+
+  -- Target-country knowledge produced on cited papers with no US
+  -- participation, relative to all country-mapped references.
+  SAFE_DIVIDE(
+    COALESCE(cc.country_mass_nonus, 0),
+    rs.n_refs_with_country
+  ) AS target_country_nonus_share_allrefs,
+
+
+  -- Conditional composition among non-US references.
+  SAFE_DIVIDE(
+    COALESCE(cc.country_mass_nonus, 0),
+    rs.n_refs_nonus
+  ) AS target_country_share_among_nonus_refs,
+
+
+  -- Stringent team self-citation exclusion.
+  SAFE_DIVIDE(
+    COALESCE(cc.country_mass_no_team_self, 0),
+    rs.n_refs_country_no_team_self
+  ) AS target_country_share_no_team_self,
+
+
+  -- Narrower AARC-faculty self-citation exclusion.
+  SAFE_DIVIDE(
+    COALESCE(cc.country_mass_no_aarc_self, 0),
+    rs.n_refs_country_no_aarc_self
+  ) AS target_country_share_no_aarc_self,
+
+
+  -- Simultaneously no-US and no team self-citation.
+  SAFE_DIVIDE(
+    COALESCE(cc.country_mass_nonus_no_team_self, 0),
+    rs.n_refs_country_no_team_self
+  ) AS target_country_nonus_share_no_team_self_allrefs,
+
+
+  SAFE_DIVIDE(
+    COALESCE(cc.country_mass_nonus_no_team_self, 0),
+    rs.n_refs_nonus_no_team_self
+  ) AS target_country_share_among_nonus_no_team_self,
+
+
+  -- High country-metadata completeness.
+  SAFE_DIVIDE(
+    COALESCE(cc.country_mass_cov80, 0),
+    rs.n_refs_cov80
+  ) AS target_country_share_cov80,
+
+  SAFE_DIVIDE(
+    COALESCE(cc.country_mass_cov95, 0),
+    rs.n_refs_cov95
+  ) AS target_country_share_cov95,
+
+
+  -- Alternative binary-ish provenance definitions.
+  SAFE_DIVIDE(
+    COALESCE(cc.country_any_count, 0),
+    rs.n_refs_with_country
+  ) AS target_country_any_share,
+
+  SAFE_DIVIDE(
+    COALESCE(cc.country_25_count, 0),
+    rs.n_refs_with_country
+  ) AS target_country_25_share,
+
+  SAFE_DIVIDE(
+    COALESCE(cc.country_majority_count, 0),
+    rs.n_refs_with_country
+  ) AS target_country_majority_share,
+
+  SAFE_DIVIDE(
+    COALESCE(cc.country_exclusive_count, 0),
+    rs.n_refs_with_country
+  ) AS target_country_exclusive_share,
+
+
+  -- =========================================================
+  -- INTELLECTUAL CONTROLS
+  -- =========================================================
+
+  fp.topic_id,
+  fp.topic_name,
+
+  fp.subfield_id,
+  fp.subfield_name,
+
+  fp.field_id,
+  fp.field_name,
+
+  fp.domain_id,
+  fp.domain_name,
+
+  fp.source_id,
+  fp.source_name,
+
+  fp.language,
+
+
+  -- =========================================================
+  -- PAPER IMPACT
+  -- =========================================================
+
+  fp.fwci,
+  fp.citation_percentile,
+  fp.is_top1,
+  fp.is_top10,
+
+
+  -- =========================================================
+  -- CHARACTERISTICS OF CITED KNOWLEDGE
+  -- =========================================================
+
+  rs.mean_reference_age,
+  rs.mean_cited_fwci,
+  rs.mean_cited_global_citations
+
+FROM
+  `foreign-phd.unitanalysis.broker2_paper_country_exposure50` pc
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_focal_papers` fp
+
+ON
+  pc.work_id = fp.work_id
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_current_country_exposure50` cur
+
+ON
+  pc.work_id = cur.work_id
+  AND pc.degree_country = cur.degree_country
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_citing_country_summary` cs
+
+ON
+  pc.work_id = cs.work_id
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_paper_reference_summary` rs
+
+ON
+  pc.work_id = rs.work_id
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_paper_cited_country` cc
+
+ON
+  pc.work_id = cc.work_id
+  AND pc.country_code = cc.cited_country_code
+;
+
+
+-- =====================================================================
+-- 28. ORGANIZATIONAL CONTEXT
+--
+-- Kept separately to avoid blowing up paper-country table.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_paper_organizational_context` AS
+
+SELECT DISTINCT
+
+  ap.work_id,
+
+  u.PersonId,
+  u.author_id,
+
+  u.InstitutionId,
+  u.InstitutionName,
+
+  u.UnitId,
+  u.UnitName,
+
+  u.TaxonomyLevel01Id,
+  u.TaxonomyLevel01Name,
+
+  u.Umbrella,
+  u.Area,
+
+  u.degree_country,
+  u.degree_country_code
+
+FROM
+  `foreign-phd.unitanalysis.broker2_aarc_paper_authors` ap
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_faculty_year_units` u
+
+ON
+  ap.PersonId = u.PersonId
+  AND ap.publication_year = u.year
+;
+
+
+-- =====================================================================
+-- 29. VALIDATION: TARGET COUNTRIES
+-- =====================================================================
+
+SELECT
+  degree_country_rank,
+  degree_country,
+  degree_country_code,
+  n_faculty
+
+FROM
+  `foreign-phd.unitanalysis.broker2_top50_degree_countries`
+
+ORDER BY
+  degree_country_rank
+;
+
+
+-- =====================================================================
+-- 30. VALIDATION: COUNTRY-WEIGHT SUMS
+--
+-- Should be essentially 1 for every cited work with mapped countries.
+-- =====================================================================
+
+SELECT
+
+  APPROX_QUANTILES(
+    total_weight,
+    20
+  ) AS country_weight_quantiles
+
+FROM (
+
+  SELECT
+    cited_work_id,
+    SUM(country_weight) AS total_weight
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_cited_work_country`
+
+  GROUP BY
+    cited_work_id
+)
+;
+
+
+-- =====================================================================
+-- 31. VALIDATION: SELF-CITATION MUST BE NONZERO
+-- =====================================================================
+
+SELECT
+
+  COUNT(*) AS citation_edges,
+
+  COUNTIF(team_self_citation = 1)
+    AS team_selfcitation_edges,
+
+  SAFE_DIVIDE(
+    COUNTIF(team_self_citation = 1),
+    COUNT(*)
+  ) AS team_selfcitation_rate,
+
+  COUNTIF(aarc_self_citation = 1)
+    AS aarc_selfcitation_edges,
+
+  SAFE_DIVIDE(
+    COUNTIF(aarc_self_citation = 1),
+    COUNT(*)
+  ) AS aarc_selfcitation_rate
+
+FROM
+  `foreign-phd.unitanalysis.broker2_citation_edges`
+;
+
+
+-- =====================================================================
+-- 32. VALIDATION: EMPIRICAL AUTHORSHIP COMPLETENESS
+-- =====================================================================
+
+SELECT
+
+  APPROX_QUANTILES(
+    cited_authorship_record_coverage,
+    20
+  ) AS authorship_record_coverage_quantiles,
+
+  APPROX_QUANTILES(
+    cited_country_coverage_observed,
+    20
+  ) AS country_coverage_observed_quantiles,
+
+  APPROX_QUANTILES(
+    cited_country_coverage_reported,
+    20
+  ) AS country_coverage_reported_quantiles
+
+FROM
+  `foreign-phd.unitanalysis.broker2_citation_edges`
+;
+
+
+-- =====================================================================
+-- 33. VALIDATION: WHAT DOES authorships_truncated ACTUALLY CONTAIN?
+--
+-- Diagnostic only.
+-- =====================================================================
+
+SELECT
+
+  CAST(cited_authorships_truncated AS STRING)
+    AS authorships_truncated_value,
+
+  COUNT(DISTINCT cited_work_id)
+    AS n_cited_works,
+
+  AVG(cited_authorship_record_coverage)
+    AS mean_record_coverage
+
+FROM
+  `foreign-phd.unitanalysis.broker2_citation_edges`
+
+GROUP BY
+  cited_authorships_truncated
+
+ORDER BY
+  n_cited_works DESC
+;
+
+
+-- =====================================================================
+-- 34. VALIDATION: FINAL PANEL SIZE
+-- =====================================================================
+
+SELECT
+
+  COUNT(*) AS paper_country_rows,
+
+  COUNT(DISTINCT work_id)
+    AS unique_papers,
+
+  SAFE_DIVIDE(
+    COUNT(*),
+    COUNT(DISTINCT work_id)
+  ) AS target_countries_per_paper
+
+FROM
+  `foreign-phd.unitanalysis.broker2_paper_country50`
+;
+
+
+-- =====================================================================
+-- 35. VALIDATION: ROBUSTNESS SAMPLE COUNTS BY COUNTRY
+-- =====================================================================
+
+SELECT
+
+  degree_country_rank,
+  target_degree_country,
+  target_country_code,
+
+  COUNTIF(
+    has_matching_degree_author = 1
+  ) AS n_exposed,
+
+  COUNTIF(
+    has_matching_degree_author = 1
+    AND other_coauthor_current_target_country = 0
+  ) AS n_exposed_no_active_target_country_coauthor,
+
+  COUNTIF(
+    has_matching_degree_author = 1
+    AND current_team_us_only = 1
+    AND citing_country_coverage_observed >= 0.80
+  ) AS n_exposed_us_only_team_cov80,
+
+  COUNTIF(
+    has_matching_degree_author = 1
+    AND matching_degree_corresponding = 1
+  ) AS n_exposed_corresponding,
+
+  COUNTIF(
+    has_matching_degree_author = 1
+    AND n_aarc_faculty = 1
+  ) AS n_exposed_sole_aarc_faculty,
+
+  AVG(reference_country_coverage)
+    AS mean_reference_country_coverage,
+
+  AVG(team_selfcitation_share)
+    AS mean_team_selfcitation_share
+
+FROM
+  `foreign-phd.unitanalysis.broker2_paper_country50`
+
+GROUP BY
+  degree_country_rank,
+  target_degree_country,
+  target_country_code
+
+ORDER BY
+  degree_country_rank
+;
