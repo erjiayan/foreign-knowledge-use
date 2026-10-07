@@ -1,0 +1,847 @@
+-- =====================================================================
+-- FIGURE 3
+-- PORTABILITY OF THE TRAINING-COUNTRY KNOWLEDGE IMPRINT
+--
+-- Question:
+-- Does the country-specific training imprint survive after removing
+-- contemporaneous ties to the training country?
+--
+-- Countries:
+-- 38 doctoral-training countries represented by >=50 professors.
+--
+-- Six specifications:
+--
+-- 1 baseline
+--
+-- 2 no_active_coauthor
+--   no OTHER author currently affiliated with target country
+--
+-- 3 no_active_coauthor_no_self
+--   same sample as #2 + team self-citations excluded
+--
+-- 4 us_only
+--   all mapped current author affiliations are US
+--   citing-country coverage >= 0.99
+--
+-- 5 us_only_no_self
+--   same as #4 + team self-citations excluded
+--
+-- 6 us_only_no_self_nonus
+--   same citing-team restriction as #5
+--   outcome counts target-country citation mass only on cited works
+--   with no US-affiliated authors, after team self-citation removal
+--
+-- Main adjustment:
+-- OpenAlex subfield x publication year standardization
+--
+-- =====================================================================
+
+
+-- =====================================================================
+-- 0. 38-COUNTRY SET
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig3_countries38` AS
+
+SELECT
+  degree_country,
+  country_code,
+  n_faculty,
+  degree_country_rank
+
+FROM
+  `foreign-phd.unitanalysis.broker2_target_countries`
+
+WHERE country_code IN (
+  'GB','CA','DE','CN','IN','RU','FR','AU','IT','JP',
+  'IL','CH','NL','ES','PL','KR','SE','AR','BE','AT',
+  'BR','NZ','IE','ZA','DK','GR','UA','SG','RO','HU',
+  'MX','IR','FI','TR','BG','EG','PK','TW'
+);
+
+
+-- =====================================================================
+-- 1. BASE ANALYTIC PAPER x COUNTRY SAMPLE
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig3_base` AS
+
+SELECT
+
+  p.work_id,
+  p.publication_year,
+
+  p.target_degree_country AS training_country,
+  p.target_country_code AS training_country_code,
+
+  c.n_faculty AS training_country_n_faculty,
+  c.degree_country_rank,
+
+  p.has_matching_degree_author,
+
+  p.subfield_id,
+  p.subfield_name,
+
+  p.n_refs_with_country,
+  p.reference_country_coverage,
+
+  -- current collaboration variables
+  p.other_coauthor_current_target_country,
+  p.any_current_target_country,
+
+  p.current_team_us_only,
+  p.citing_country_coverage_observed,
+  p.authorship_record_coverage,
+
+  -- outcomes
+  p.target_country_share,
+
+  p.target_country_share_no_team_self,
+
+  p.target_country_nonus_share_allrefs,
+
+  p.target_country_nonus_share_no_team_self_allrefs,
+
+  -- diagnostics
+  p.n_team_selfcitations,
+  p.team_selfcitation_share,
+
+  p.authors_count,
+  p.n_aarc_faculty
+
+FROM
+  `foreign-phd.unitanalysis.broker2_paper_country50` p
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig3_countries38` c
+
+ON
+  p.target_country_code = c.country_code
+
+WHERE
+
+  p.publication_year BETWEEN 2011 AND 2020
+
+  AND p.subfield_id IS NOT NULL
+
+  AND p.n_refs_with_country >= 10
+
+  AND p.target_country_share IS NOT NULL
+;
+
+
+-- =====================================================================
+-- 2. LONG SPECIFICATION TABLE
+--
+-- One row:
+-- paper x training country x specification
+--
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig3_long` AS
+
+
+-- ---------------------------------------------------------------------
+-- SPEC 1: BASELINE
+-- ---------------------------------------------------------------------
+
+SELECT
+
+  work_id,
+  publication_year,
+
+  training_country,
+  training_country_code,
+
+  training_country_n_faculty,
+  degree_country_rank,
+
+  has_matching_degree_author,
+
+  subfield_id,
+  subfield_name,
+
+  1 AS spec_order,
+
+  'baseline' AS spec_id,
+
+  'Baseline' AS spec_label,
+
+  target_country_share AS outcome
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_base`
+
+WHERE
+  target_country_share IS NOT NULL
+
+
+UNION ALL
+
+
+-- ---------------------------------------------------------------------
+-- SPEC 2: NO ACTIVE TARGET-COUNTRY COAUTHOR
+-- ---------------------------------------------------------------------
+
+SELECT
+
+  work_id,
+  publication_year,
+
+  training_country,
+  training_country_code,
+
+  training_country_n_faculty,
+  degree_country_rank,
+
+  has_matching_degree_author,
+
+  subfield_id,
+  subfield_name,
+
+  2 AS spec_order,
+
+  'no_active_coauthor' AS spec_id,
+
+  'No active training-country coauthor' AS spec_label,
+
+  target_country_share AS outcome
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_base`
+
+WHERE
+  other_coauthor_current_target_country = 0
+
+  AND target_country_share IS NOT NULL
+
+
+UNION ALL
+
+
+-- ---------------------------------------------------------------------
+-- SPEC 3: NO ACTIVE COAUTHOR + TEAM SELF-CITATIONS REMOVED
+-- ---------------------------------------------------------------------
+
+SELECT
+
+  work_id,
+  publication_year,
+
+  training_country,
+  training_country_code,
+
+  training_country_n_faculty,
+  degree_country_rank,
+
+  has_matching_degree_author,
+
+  subfield_id,
+  subfield_name,
+
+  3 AS spec_order,
+
+  'no_active_coauthor_no_self' AS spec_id,
+
+  'No active coauthor + no team self-citations' AS spec_label,
+
+  target_country_share_no_team_self AS outcome
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_base`
+
+WHERE
+  other_coauthor_current_target_country = 0
+
+  AND target_country_share_no_team_self IS NOT NULL
+
+
+UNION ALL
+
+
+-- ---------------------------------------------------------------------
+-- SPEC 4: US-ONLY CURRENT TEAM
+--
+-- Require >=80% observed authorship-country coverage.
+-- ---------------------------------------------------------------------
+
+SELECT
+
+  work_id,
+  publication_year,
+
+  training_country,
+  training_country_code,
+
+  training_country_n_faculty,
+  degree_country_rank,
+
+  has_matching_degree_author,
+
+  subfield_id,
+  subfield_name,
+
+  4 AS spec_order,
+
+  'us_only' AS spec_id,
+
+  'U.S.-only citing team' AS spec_label,
+
+  target_country_share AS outcome
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_base`
+
+WHERE
+  current_team_us_only = 1
+  AND citing_country_coverage_observed >= 0.999999
+  AND authorship_record_coverage >= 0.999999
+
+  AND target_country_share IS NOT NULL
+
+
+UNION ALL
+
+
+-- ---------------------------------------------------------------------
+-- SPEC 5: US-ONLY CURRENT TEAM + TEAM SELF-CITATIONS REMOVED
+-- ---------------------------------------------------------------------
+
+SELECT
+
+  work_id,
+  publication_year,
+
+  training_country,
+  training_country_code,
+
+  training_country_n_faculty,
+  degree_country_rank,
+
+  has_matching_degree_author,
+
+  subfield_id,
+  subfield_name,
+
+  5 AS spec_order,
+
+  'us_only_no_self' AS spec_id,
+
+  'U.S.-only team + no team self-citations' AS spec_label,
+
+  target_country_share_no_team_self AS outcome
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_base`
+
+WHERE
+current_team_us_only = 1
+AND citing_country_coverage_observed >= 0.999999
+AND authorship_record_coverage >= 0.999999
+
+  AND target_country_share_no_team_self IS NOT NULL
+
+
+UNION ALL
+
+
+-- ---------------------------------------------------------------------
+-- SPEC 6:
+-- US-ONLY TEAM
+-- + TEAM SELF-CITATIONS REMOVED
+-- + TARGET-COUNTRY KNOWLEDGE ON CITED WORKS WITH NO US AFFILIATION
+--
+-- The denominator remains the country-mapped, non-self reference set.
+-- Thus this represents the share of the usable reference list that
+-- reaches into target-country research with no US participation.
+-- ---------------------------------------------------------------------
+
+SELECT
+
+  work_id,
+  publication_year,
+
+  training_country,
+  training_country_code,
+
+  training_country_n_faculty,
+  degree_country_rank,
+
+  has_matching_degree_author,
+
+  subfield_id,
+  subfield_name,
+
+  6 AS spec_order,
+
+  'us_only_no_self_nonus' AS spec_id,
+
+  'U.S.-only team + no self-citations + non-U.S. cited knowledge'
+    AS spec_label,
+
+  target_country_nonus_share_no_team_self_allrefs AS outcome
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_base`
+
+WHERE
+current_team_us_only = 1
+AND citing_country_coverage_observed >= 0.999999
+AND authorship_record_coverage >= 0.999999
+
+  AND target_country_nonus_share_no_team_self_allrefs IS NOT NULL
+;
+
+
+-- =====================================================================
+-- 3. SUBFIELD x YEAR STRATA
+--
+-- Same design used for Figure 1.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig3_strata` AS
+
+WITH grouped AS (
+
+  SELECT
+
+    spec_order,
+    spec_id,
+    spec_label,
+
+    training_country,
+    training_country_code,
+
+    ANY_VALUE(training_country_n_faculty)
+      AS training_country_n_faculty,
+
+    ANY_VALUE(degree_country_rank)
+      AS degree_country_rank,
+
+    subfield_id,
+    publication_year,
+
+
+    -- exposed
+    COUNTIF(
+      has_matching_degree_author = 1
+    ) AS n_exposed,
+
+    AVG(
+      IF(
+        has_matching_degree_author = 1,
+        outcome,
+        NULL
+      )
+    ) AS exposed_mean,
+
+    VAR_SAMP(
+      IF(
+        has_matching_degree_author = 1,
+        outcome,
+        NULL
+      )
+    ) AS exposed_variance,
+
+
+    -- controls
+    COUNTIF(
+      has_matching_degree_author = 0
+    ) AS n_control,
+
+    AVG(
+      IF(
+        has_matching_degree_author = 0,
+        outcome,
+        NULL
+      )
+    ) AS control_mean,
+
+    VAR_SAMP(
+      IF(
+        has_matching_degree_author = 0,
+        outcome,
+        NULL
+      )
+    ) AS control_variance
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig3_long`
+
+  GROUP BY
+
+    spec_order,
+    spec_id,
+    spec_label,
+
+    training_country,
+    training_country_code,
+
+    subfield_id,
+    publication_year
+)
+
+SELECT *
+
+FROM grouped
+
+WHERE
+
+  n_exposed >= 5
+
+  AND n_control >= 20
+
+  AND exposed_mean IS NOT NULL
+
+  AND control_mean IS NOT NULL
+;
+
+
+-- =====================================================================
+-- 4. STANDARDIZED COUNTRY x SPECIFICATION RESULTS
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig3_results` AS
+
+WITH totals AS (
+
+  SELECT
+
+    spec_order,
+    spec_id,
+    spec_label,
+
+    training_country,
+    training_country_code,
+
+    ANY_VALUE(training_country_n_faculty)
+      AS training_country_n_faculty,
+
+    ANY_VALUE(degree_country_rank)
+      AS degree_country_rank,
+
+    SUM(n_exposed)
+      AS n_exposed_adjusted,
+
+    SUM(n_control)
+      AS n_control_stratum_total,
+
+    COUNT(*)
+      AS n_valid_strata
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig3_strata`
+
+  GROUP BY
+
+    spec_order,
+    spec_id,
+    spec_label,
+
+    training_country,
+    training_country_code
+),
+
+weighted AS (
+
+  SELECT
+
+    s.spec_order,
+    s.spec_id,
+    s.spec_label,
+
+    s.training_country,
+    s.training_country_code,
+
+    t.training_country_n_faculty,
+    t.degree_country_rank,
+
+    t.n_exposed_adjusted,
+    t.n_control_stratum_total,
+    t.n_valid_strata,
+
+    SAFE_DIVIDE(
+      s.n_exposed,
+      t.n_exposed_adjusted
+    ) AS stratum_weight,
+
+    s.exposed_mean,
+    s.control_mean,
+
+    s.exposed_variance,
+    s.control_variance,
+
+    s.n_exposed,
+    s.n_control
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig3_strata` s
+
+  JOIN totals t
+
+  USING (
+    spec_order,
+    spec_id,
+    spec_label,
+    training_country,
+    training_country_code
+  )
+),
+
+agg AS (
+
+  SELECT
+
+    spec_order,
+    spec_id,
+    spec_label,
+
+    training_country,
+    training_country_code,
+
+    ANY_VALUE(training_country_n_faculty)
+      AS training_country_n_faculty,
+
+    ANY_VALUE(degree_country_rank)
+      AS degree_country_rank,
+
+    ANY_VALUE(n_exposed_adjusted)
+      AS n_exposed_adjusted,
+
+    ANY_VALUE(n_control_stratum_total)
+      AS n_control_stratum_total,
+
+    ANY_VALUE(n_valid_strata)
+      AS n_valid_strata,
+
+
+    SUM(
+      stratum_weight * exposed_mean
+    ) AS exposed_mean_adj,
+
+    SUM(
+      stratum_weight * control_mean
+    ) AS control_mean_adj,
+
+
+    SUM(
+
+      POW(stratum_weight, 2)
+
+      *
+
+      (
+        SAFE_DIVIDE(
+          COALESCE(exposed_variance, 0),
+          n_exposed
+        )
+
+        +
+
+        SAFE_DIVIDE(
+          COALESCE(control_variance, 0),
+          n_control
+        )
+      )
+
+    ) AS difference_variance
+
+  FROM weighted
+
+  GROUP BY
+
+    spec_order,
+    spec_id,
+    spec_label,
+
+    training_country,
+    training_country_code
+)
+
+SELECT
+
+  spec_order,
+  spec_id,
+  spec_label,
+
+  training_country,
+  training_country_code,
+
+  training_country_n_faculty,
+  degree_country_rank,
+
+  n_exposed_adjusted,
+  n_control_stratum_total,
+  n_valid_strata,
+
+
+  100 * exposed_mean_adj
+    AS exposed_share_pct,
+
+  100 * control_mean_adj
+    AS control_share_pct,
+
+
+  100 * (
+    exposed_mean_adj - control_mean_adj
+  ) AS difference_pp_adj,
+
+
+  100 * SQRT(
+    difference_variance
+  ) AS difference_se_pp,
+
+
+  100 * (
+    exposed_mean_adj
+    - control_mean_adj
+    - 1.96 * SQRT(difference_variance)
+  ) AS ci95_low_pp,
+
+
+  100 * (
+    exposed_mean_adj
+    - control_mean_adj
+    + 1.96 * SQRT(difference_variance)
+  ) AS ci95_high_pp,
+
+
+  SAFE_DIVIDE(
+    exposed_mean_adj,
+    control_mean_adj
+  ) AS lift_adj
+
+FROM agg
+;
+
+
+-- =====================================================================
+-- 5. SPECIFICATION-LEVEL SUMMARY ACROSS 38 COUNTRIES
+--
+-- Used for Panel A.
+--
+-- Median and IQR describe cross-country heterogeneity.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig3_spec_summary` AS
+
+SELECT
+
+  spec_order,
+  spec_id,
+  spec_label,
+
+  COUNT(*) AS n_countries,
+
+  COUNTIF(
+    difference_pp_adj > 0
+  ) AS n_positive,
+
+  APPROX_QUANTILES(
+    difference_pp_adj,
+    100
+  )[OFFSET(25)] AS q25_effect_pp,
+
+  APPROX_QUANTILES(
+    difference_pp_adj,
+    100
+  )[OFFSET(50)] AS median_effect_pp,
+
+  APPROX_QUANTILES(
+    difference_pp_adj,
+    100
+  )[OFFSET(75)] AS q75_effect_pp,
+
+  AVG(difference_pp_adj)
+    AS mean_effect_pp,
+
+  SUM(n_exposed_adjusted)
+    AS total_exposed_adjusted
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_results`
+
+GROUP BY
+  spec_order,
+  spec_id,
+  spec_label
+;
+
+
+-- =====================================================================
+-- 6. TOP 12
+--
+-- Mechanical selection based on baseline training-country sample size.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig3_top12` AS
+
+SELECT
+
+  training_country,
+  training_country_code,
+  training_country_n_faculty
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_results`
+
+WHERE
+  spec_id = 'baseline'
+
+QUALIFY
+  ROW_NUMBER() OVER (
+    ORDER BY
+      training_country_n_faculty DESC,
+      training_country
+  ) <= 12
+;
+
+
+-- =====================================================================
+-- 7. VALIDATION
+-- =====================================================================
+
+SELECT
+
+  spec_order,
+  spec_label,
+
+  n_countries,
+  n_positive,
+
+  median_effect_pp,
+  q25_effect_pp,
+  q75_effect_pp,
+
+  total_exposed_adjusted
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_spec_summary`
+
+ORDER BY
+  spec_order
+;
+
+
+-- Country-specific cleanest estimates
+
+SELECT
+
+  r.*
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig3_results` r
+
+WHERE
+  r.spec_id = 'us_only_no_self_nonus'
+
+ORDER BY
+  r.difference_pp_adj DESC
+;
