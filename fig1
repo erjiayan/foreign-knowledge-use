@@ -1,0 +1,610 @@
+-- =====================================================================
+-- FIGURE 1
+-- DOCTORAL TRAINING AND THE GEOGRAPHY OF KNOWLEDGE USE
+--
+-- Main question:
+-- Within the same OpenAlex subfield and publication year,
+-- do papers involving a faculty member trained in country c
+-- cite more knowledge associated with country c?
+--
+-- Main-text sample:
+-- fixed 30-country set
+--
+-- Outcome:
+-- author-fractional target-country citation share
+--
+-- Adjustment:
+-- OpenAlex subfield x publication year standardization
+--
+-- Weighting:
+-- Standardize control means to the observed subfield-year
+-- distribution of exposed papers for each country.
+--
+-- Minimum usable reference information:
+-- at least 10 references with mapped country information.
+--
+
+-- =====================================================================
+
+
+
+-- =====================================================================
+-- 0. FIXED MAIN-TEXT 30-COUNTRY SET
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_main30_countries` AS
+
+SELECT *
+FROM
+  `foreign-phd.unitanalysis.broker2_target_countries`
+
+WHERE country_code IN (
+  'GB','CA','DE','CN','IN','RU','FR','AU','IT','JP',
+  'IL','CH','NL','ES','PL','KR','SE','AR','BE','AT',
+  'BR','NZ','IE','ZA','DK','GR','UA','SG','RO','HU'
+);
+
+
+
+-- =====================================================================
+-- 1. FIGURE 1 ANALYSIS SAMPLE
+--
+-- One row = paper x target country.
+--
+-- We require:
+--   - target country in main 30
+--   - >=10 country-mapped references
+--   - nonmissing target-country share
+--   - valid subfield
+--
+-- We DO NOT impose country-coverage threshold here.
+-- Coverage >=80% and >=95% belong in supplementary robustness.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig1_sample` AS
+
+SELECT
+
+  p.work_id,
+  p.publication_year,
+
+  p.target_degree_country,
+  p.target_country_code,
+
+  m.n_faculty,
+  m.degree_country_rank,
+
+  p.has_matching_degree_author,
+
+  p.target_country_share,
+
+  p.target_country_mass,
+
+  p.n_refs_with_country,
+  p.n_reference_edges,
+  p.reference_country_coverage,
+
+  p.subfield_id,
+  p.subfield_name,
+
+  p.field_id,
+  p.field_name,
+
+  p.domain_id,
+  p.domain_name,
+
+  p.authors_count,
+  p.n_aarc_faculty,
+
+  p.fwci,
+  p.is_top1
+
+FROM
+  `foreign-phd.unitanalysis.broker2_paper_country50` p
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_main30_countries` m
+
+ON
+  p.target_country_code = m.country_code
+
+WHERE
+  p.target_country_share IS NOT NULL
+
+  AND p.n_refs_with_country >= 10
+
+  AND p.subfield_id IS NOT NULL
+
+  AND p.publication_year BETWEEN 2011 AND 2020;
+
+
+
+-- =====================================================================
+-- 2. RAW DESCRIPTIVE RESULTS
+--
+-- These are useful for checking how much field/year adjustment matters.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig1_raw` AS
+
+SELECT
+
+  target_degree_country,
+  target_country_code,
+
+  ANY_VALUE(n_faculty) AS n_faculty,
+  ANY_VALUE(degree_country_rank) AS degree_country_rank,
+
+  COUNTIF(
+    has_matching_degree_author = 1
+  ) AS n_exposed,
+
+  COUNTIF(
+    has_matching_degree_author = 0
+  ) AS n_control,
+
+
+  AVG(
+    IF(
+      has_matching_degree_author = 1,
+      target_country_share,
+      NULL
+    )
+  ) AS exposed_mean_raw,
+
+  AVG(
+    IF(
+      has_matching_degree_author = 0,
+      target_country_share,
+      NULL
+    )
+  ) AS control_mean_raw
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig1_sample`
+
+GROUP BY
+  target_degree_country,
+  target_country_code;
+
+
+
+-- =====================================================================
+-- 3. SUBFIELD x YEAR STRATUM STATISTICS
+--
+-- We retain:
+--   count
+--   mean
+--   variance
+--
+-- separately for exposed and control papers.
+--
+-- These sufficient statistics allow us to:
+--   - standardize means
+--   - calculate absolute effects
+--   - calculate relative lifts
+--   - calculate analytic SEs
+--   - bootstrap strata later without downloading paper-level data
+--
+-- Require:
+--   >= 5 exposed papers
+--   >= 20 control papers
+--
+-- within each country x subfield x year stratum.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig1_strata` AS
+
+WITH grouped AS (
+
+  SELECT
+
+    target_degree_country,
+    target_country_code,
+
+    ANY_VALUE(n_faculty) AS n_faculty,
+    ANY_VALUE(degree_country_rank) AS degree_country_rank,
+
+    subfield_id,
+    ANY_VALUE(subfield_name) AS subfield_name,
+
+    publication_year,
+
+
+    -- ---------------------------------------------------------
+    -- EXPOSED
+    -- ---------------------------------------------------------
+
+    COUNTIF(
+      has_matching_degree_author = 1
+    ) AS n_exposed,
+
+    AVG(
+      IF(
+        has_matching_degree_author = 1,
+        target_country_share,
+        NULL
+      )
+    ) AS exposed_mean,
+
+    VAR_SAMP(
+      IF(
+        has_matching_degree_author = 1,
+        target_country_share,
+        NULL
+      )
+    ) AS exposed_variance,
+
+
+    -- ---------------------------------------------------------
+    -- CONTROL
+    -- ---------------------------------------------------------
+
+    COUNTIF(
+      has_matching_degree_author = 0
+    ) AS n_control,
+
+    AVG(
+      IF(
+        has_matching_degree_author = 0,
+        target_country_share,
+        NULL
+      )
+    ) AS control_mean,
+
+    VAR_SAMP(
+      IF(
+        has_matching_degree_author = 0,
+        target_country_share,
+        NULL
+      )
+    ) AS control_variance
+
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig1_sample`
+
+  GROUP BY
+
+    target_degree_country,
+    target_country_code,
+    subfield_id,
+    publication_year
+)
+
+SELECT
+
+  *,
+
+  exposed_mean - control_mean
+    AS stratum_difference,
+
+  SAFE_DIVIDE(
+    exposed_mean,
+    control_mean
+  ) AS stratum_lift
+
+FROM grouped
+
+WHERE
+
+  n_exposed >= 5
+  AND n_control >= 20
+
+  AND exposed_mean IS NOT NULL
+  AND control_mean IS NOT NULL;
+
+
+
+-- =====================================================================
+-- 4. COUNTRY-LEVEL STANDARDIZED RESULTS
+--
+-- Standardization target:
+-- exposed-paper distribution across subfield x year.
+--
+-- For country c:
+--
+--   w_h = n_exposed_h / total exposed
+--
+--   exposed_adj = sum(w_h * exposed_mean_h)
+--   control_adj = sum(w_h * control_mean_h)
+--
+-- Therefore we compare exposed and controls in the same
+-- disciplinary/temporal composition.
+--
+-- Approximate variance:
+--
+-- sum_h [
+--   w_h^2 *
+--   (Var(Y1_h)/n1_h + Var(Y0_h)/n0_h)
+-- ]
+--
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig1_results` AS
+
+WITH totals AS (
+
+  SELECT
+
+    target_degree_country,
+    target_country_code,
+
+    ANY_VALUE(n_faculty) AS n_faculty,
+    ANY_VALUE(degree_country_rank) AS degree_country_rank,
+
+    SUM(n_exposed)
+      AS n_exposed_adjusted,
+
+    SUM(n_control)
+      AS n_control_stratum_total,
+
+    COUNT(*)
+      AS n_valid_subfield_year_strata
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig1_strata`
+
+  GROUP BY
+    target_degree_country,
+    target_country_code
+),
+
+weighted AS (
+
+  SELECT
+
+    s.target_degree_country,
+    s.target_country_code,
+
+    t.n_faculty,
+    t.degree_country_rank,
+
+    t.n_exposed_adjusted,
+    t.n_control_stratum_total,
+    t.n_valid_subfield_year_strata,
+
+    SAFE_DIVIDE(
+      s.n_exposed,
+      t.n_exposed_adjusted
+    ) AS stratum_weight,
+
+    s.exposed_mean,
+    s.control_mean,
+
+    s.exposed_variance,
+    s.control_variance,
+
+    s.n_exposed,
+    s.n_control
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig1_strata` s
+
+  JOIN totals t
+
+  USING (
+    target_degree_country,
+    target_country_code
+  )
+),
+
+aggregated AS (
+
+  SELECT
+
+    target_degree_country,
+    target_country_code,
+
+    ANY_VALUE(n_faculty)
+      AS n_faculty,
+
+    ANY_VALUE(degree_country_rank)
+      AS degree_country_rank,
+
+    ANY_VALUE(n_exposed_adjusted)
+      AS n_exposed_adjusted,
+
+    ANY_VALUE(n_control_stratum_total)
+      AS n_control_stratum_total,
+
+    ANY_VALUE(n_valid_subfield_year_strata)
+      AS n_valid_subfield_year_strata,
+
+
+    -- ---------------------------------------------------------
+    -- STANDARDIZED MEANS
+    -- ---------------------------------------------------------
+
+    SUM(
+      stratum_weight * exposed_mean
+    ) AS exposed_mean_adj,
+
+    SUM(
+      stratum_weight * control_mean
+    ) AS control_mean_adj,
+
+
+    -- ---------------------------------------------------------
+    -- VARIANCE OF STANDARDIZED DIFFERENCE
+    -- ---------------------------------------------------------
+
+    SUM(
+
+      POW(stratum_weight, 2)
+
+      *
+
+      (
+        SAFE_DIVIDE(
+          COALESCE(exposed_variance, 0),
+          n_exposed
+        )
+
+        +
+
+        SAFE_DIVIDE(
+          COALESCE(control_variance, 0),
+          n_control
+        )
+      )
+
+    ) AS difference_variance
+
+  FROM weighted
+
+  GROUP BY
+    target_degree_country,
+    target_country_code
+)
+
+SELECT
+
+  a.target_degree_country,
+  a.target_country_code,
+
+  a.degree_country_rank,
+  a.n_faculty,
+
+  r.n_exposed AS n_exposed_raw,
+  r.n_control AS n_control_raw,
+
+  a.n_exposed_adjusted,
+  a.n_control_stratum_total,
+
+  a.n_valid_subfield_year_strata,
+
+
+  -- ---------------------------------------------------------
+  -- RAW
+  -- ---------------------------------------------------------
+
+  r.exposed_mean_raw,
+  r.control_mean_raw,
+
+  r.exposed_mean_raw - r.control_mean_raw
+    AS difference_raw,
+
+  SAFE_DIVIDE(
+    r.exposed_mean_raw,
+    r.control_mean_raw
+  ) AS lift_raw,
+
+
+  -- ---------------------------------------------------------
+  -- ADJUSTED
+  -- ---------------------------------------------------------
+
+  a.exposed_mean_adj,
+  a.control_mean_adj,
+
+  a.exposed_mean_adj - a.control_mean_adj
+    AS difference_adj,
+
+  100 * (
+    a.exposed_mean_adj - a.control_mean_adj
+  ) AS difference_pp_adj,
+
+  SAFE_DIVIDE(
+    a.exposed_mean_adj,
+    a.control_mean_adj
+  ) AS lift_adj,
+
+  100 * SAFE_DIVIDE(
+    a.exposed_mean_adj - a.control_mean_adj,
+    a.control_mean_adj
+  ) AS lift_pct_adj,
+
+
+  -- ---------------------------------------------------------
+  -- APPROXIMATE STANDARD ERROR + 95% CI
+  -- ---------------------------------------------------------
+
+  SQRT(
+    a.difference_variance
+  ) AS difference_se,
+
+  100 * SQRT(
+    a.difference_variance
+  ) AS difference_se_pp,
+
+  100 * (
+    (
+      a.exposed_mean_adj - a.control_mean_adj
+    )
+
+    - 1.96 * SQRT(a.difference_variance)
+  ) AS ci95_low_pp,
+
+  100 * (
+    (
+      a.exposed_mean_adj - a.control_mean_adj
+    )
+
+    + 1.96 * SQRT(a.difference_variance)
+  ) AS ci95_high_pp
+
+FROM aggregated a
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_fig1_raw` r
+
+USING (
+  target_degree_country,
+  target_country_code
+)
+
+ORDER BY
+  difference_pp_adj DESC;
+
+
+
+-- =====================================================================
+-- 5. FINAL FIGURE 1 OUTPUT
+-- =====================================================================
+
+SELECT
+
+  degree_country_rank,
+
+  target_degree_country,
+  target_country_code,
+
+  n_faculty,
+
+  n_exposed_raw,
+  n_exposed_adjusted,
+
+  n_valid_subfield_year_strata,
+
+  100 * control_mean_adj
+    AS control_share_pct,
+
+  100 * exposed_mean_adj
+    AS exposed_share_pct,
+
+  difference_pp_adj,
+
+  difference_se_pp,
+
+  ci95_low_pp,
+  ci95_high_pp,
+
+  lift_adj,
+  lift_pct_adj,
+
+  difference_raw * 100
+    AS difference_pp_raw,
+
+  lift_raw
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig1_results`
+
+ORDER BY
+  difference_pp_adj DESC;
