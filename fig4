@@ -1,0 +1,1001 @@
+-- =====================================================================
+-- FIGURE 4 FINAL
+-- FOREIGN-TRAINED COLLABORATORS AS GATEWAYS TO COUNTRY-SPECIFIC KNOWLEDGE
+--
+-- Uses validated V2 tables.
+--
+-- PANEL A:
+--   joint paper similarity to:
+--      broker prior profile
+--      focal prior profile
+--
+-- PANEL B:
+--   country-c citation share:
+--      focal PRE
+--      JOINT PAPER
+--
+-- PANEL C:
+--   country-c citation share:
+--      focal PRE
+--      focal clean POST
+--
+-- PANEL D:
+--   repeated-collaboration FE model:
+--
+--      change in country-c citation access
+--          ~
+--      broker-specific exposure in joint paper
+--
+-- =====================================================================
+
+
+-- =====================================================================
+-- 1. FOCAL SCIENTIST'S 3-YEAR PRE-COLLABORATION TOPIC PROFILE
+--
+-- Uses the already validated focal topic vectors.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig4final_focal_pre_profile_raw`
+AS
+
+SELECT
+
+  e.focal_author_id,
+  e.broker_author_id,
+  e.broker_country_code,
+
+  e.joint_work_id,
+  e.joint_year,
+
+  wt.topic_id,
+
+  ANY_VALUE(
+    wt.topic_name
+  ) AS topic_name,
+
+  AVG(
+    wt.topic_weight
+  ) AS raw_profile_weight
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig4v2_joint_events` e
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4v2_focal_work_topics` wt
+
+ON
+  e.focal_author_id =
+    wt.focal_author_id
+
+  AND wt.publication_year BETWEEN
+      e.joint_year - 3
+      AND
+      e.joint_year - 1
+
+GROUP BY
+
+  e.focal_author_id,
+  e.broker_author_id,
+  e.broker_country_code,
+
+  e.joint_work_id,
+  e.joint_year,
+
+  wt.topic_id;
+
+
+-- =====================================================================
+-- 2. NORMALIZE FOCAL PRE PROFILE
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig4final_focal_pre_profile`
+AS
+
+WITH totals AS (
+
+  SELECT
+
+    focal_author_id,
+    broker_author_id,
+    broker_country_code,
+
+    joint_work_id,
+    joint_year,
+
+    SUM(raw_profile_weight)
+      AS total_weight
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig4final_focal_pre_profile_raw`
+
+  GROUP BY
+
+    focal_author_id,
+    broker_author_id,
+    broker_country_code,
+
+    joint_work_id,
+    joint_year
+)
+
+SELECT
+
+  r.focal_author_id,
+  r.broker_author_id,
+  r.broker_country_code,
+
+  r.joint_work_id,
+  r.joint_year,
+
+  r.topic_id,
+  r.topic_name,
+
+  SAFE_DIVIDE(
+    r.raw_profile_weight,
+    t.total_weight
+  ) AS focal_pre_topic_weight
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig4final_focal_pre_profile_raw` r
+
+JOIN totals t
+
+USING (
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+  joint_work_id,
+  joint_year
+)
+
+WHERE
+  t.total_weight > 0;
+
+
+-- =====================================================================
+-- 3. JOINT PAPER x FOCAL PRE-PROFILE COSINE
+--
+-- Broker cosine already exists in:
+--   broker2_fig4v2_joint_similarity
+--
+-- Here we calculate the comparable focal cosine.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig4final_joint_focal_similarity`
+AS
+
+WITH dot_product AS (
+
+  SELECT
+
+    j.focal_author_id,
+    j.broker_author_id,
+    j.broker_country_code,
+
+    j.joint_work_id,
+    j.joint_year,
+
+    SUM(
+      j.joint_topic_weight
+      *
+      f.focal_pre_topic_weight
+    ) AS dot_product
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig4v2_joint_topics` j
+
+  JOIN
+    `foreign-phd.unitanalysis.broker2_fig4final_focal_pre_profile` f
+
+  ON
+    j.focal_author_id =
+      f.focal_author_id
+
+    AND j.broker_author_id =
+      f.broker_author_id
+
+    AND j.broker_country_code =
+      f.broker_country_code
+
+    AND j.joint_work_id =
+      f.joint_work_id
+
+    AND j.joint_year =
+      f.joint_year
+
+    AND j.topic_id =
+      f.topic_id
+
+  GROUP BY
+
+    j.focal_author_id,
+    j.broker_author_id,
+    j.broker_country_code,
+
+    j.joint_work_id,
+    j.joint_year
+),
+
+joint_norm AS (
+
+  SELECT
+
+    focal_author_id,
+    broker_author_id,
+    broker_country_code,
+
+    joint_work_id,
+    joint_year,
+
+    SQRT(
+      SUM(
+        POW(
+          joint_topic_weight,
+          2
+        )
+      )
+    ) AS joint_norm
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig4v2_joint_topics`
+
+  GROUP BY
+
+    focal_author_id,
+    broker_author_id,
+    broker_country_code,
+
+    joint_work_id,
+    joint_year
+),
+
+focal_norm AS (
+
+  SELECT
+
+    focal_author_id,
+    broker_author_id,
+    broker_country_code,
+
+    joint_work_id,
+    joint_year,
+
+    SQRT(
+      SUM(
+        POW(
+          focal_pre_topic_weight,
+          2
+        )
+      )
+    ) AS focal_norm
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig4final_focal_pre_profile`
+
+  GROUP BY
+
+    focal_author_id,
+    broker_author_id,
+    broker_country_code,
+
+    joint_work_id,
+    joint_year
+)
+
+SELECT
+
+  d.focal_author_id,
+  d.broker_author_id,
+  d.broker_country_code,
+
+  d.joint_work_id,
+  d.joint_year,
+
+  SAFE_DIVIDE(
+    d.dot_product,
+    j.joint_norm * f.focal_norm
+  ) AS focal_joint_cosine
+
+FROM dot_product d
+
+JOIN joint_norm j
+
+USING (
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+  joint_work_id,
+  joint_year
+)
+
+JOIN focal_norm f
+
+USING (
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+  joint_work_id,
+  joint_year
+);
+
+
+-- =====================================================================
+-- 4. PRE-COLLABORATION COUNTRY-c CITATION ACCESS
+--
+-- Outcome:
+--   target_country_share_no_team_self
+--
+-- Window:
+--   t-3 ... t-1
+--
+-- The paper-country table is explicitly restricted to the broker's
+-- training country.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig4final_pre_country_access`
+AS
+
+SELECT
+
+  e.focal_author_id,
+  e.broker_author_id,
+  e.broker_country_code,
+
+  e.joint_work_id,
+  e.joint_year,
+
+  AVG(
+    p.target_country_share_no_team_self
+  ) AS pre_country_share,
+
+  COUNT(DISTINCT p.work_id)
+    AS n_pre_country_papers
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig4v2_joint_events` e
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4v2_aarc_paper_authors` a
+
+ON
+  e.focal_author_id =
+    a.author_id
+
+  AND a.degree_country_code = 'US'
+
+  AND a.publication_year BETWEEN
+      e.joint_year - 3
+      AND
+      e.joint_year - 1
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_paper_country50` p
+
+ON
+  a.work_id =
+    p.work_id
+
+  AND p.target_country_code =
+      e.broker_country_code
+
+WHERE
+  p.n_refs_with_country >= 10
+
+  AND p.target_country_share_no_team_self
+      IS NOT NULL
+
+GROUP BY
+
+  e.focal_author_id,
+  e.broker_author_id,
+  e.broker_country_code,
+
+  e.joint_work_id,
+  e.joint_year;
+
+
+-- =====================================================================
+-- 5. JOINT-PAPER COUNTRY-c ACCESS
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig4final_joint_country_access`
+AS
+
+SELECT
+
+  e.focal_author_id,
+  e.broker_author_id,
+  e.broker_country_code,
+
+  e.joint_work_id,
+  e.joint_year,
+
+  p.target_country_share_no_team_self
+    AS joint_country_share
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig4v2_joint_events` e
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_paper_country50` p
+
+ON
+  e.joint_work_id =
+    p.work_id
+
+  AND p.target_country_code =
+      e.broker_country_code
+
+WHERE
+  p.n_refs_with_country >= 10
+
+  AND p.target_country_share_no_team_self
+      IS NOT NULL;
+
+
+-- =====================================================================
+-- 6. CLEAN POST-COLLABORATION COUNTRY-c ACCESS
+--
+-- Window:
+--   t+1 ... t+3
+--
+-- Exclude:
+--   * original broker
+--   * other AARC c-trained coauthors
+--   * current c-affiliated coauthors
+--
+-- We already constructed the c-trained coauthor flag in V2.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig4final_post_country_access`
+AS
+
+SELECT
+
+  e.focal_author_id,
+  e.broker_author_id,
+  e.broker_country_code,
+
+  e.joint_work_id,
+  e.joint_year,
+
+  AVG(
+    p.target_country_share_no_team_self
+  ) AS post_country_share,
+
+  AVG(
+    IF(
+      p.publication_year =
+        e.joint_year + 1,
+
+      p.target_country_share_no_team_self,
+
+      NULL
+    )
+  ) AS post_year1_country_share,
+
+  COUNT(DISTINCT p.work_id)
+    AS n_post_country_papers,
+
+  COUNT(DISTINCT IF(
+    p.publication_year =
+      e.joint_year + 1,
+    p.work_id,
+    NULL
+  )) AS n_post_year1_country_papers
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig4v2_joint_events` e
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4v2_aarc_paper_authors` a
+
+ON
+  e.focal_author_id =
+    a.author_id
+
+  AND a.degree_country_code = 'US'
+
+  AND a.publication_year BETWEEN
+      e.joint_year + 1
+      AND
+      e.joint_year + 3
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_paper_country50` p
+
+ON
+  a.work_id =
+    p.work_id
+
+  AND p.target_country_code =
+      e.broker_country_code
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4v2_paper_c_flags` cf
+
+ON
+  a.author_id =
+    cf.focal_author_id
+
+  AND a.work_id =
+    cf.work_id
+
+  AND cf.target_country_code =
+      e.broker_country_code
+
+WHERE
+
+  p.n_refs_with_country >= 10
+
+  AND p.target_country_share_no_team_self
+      IS NOT NULL
+
+  AND COALESCE(
+    cf.has_aarc_c_trained_coauthor,
+    0
+  ) = 0
+
+  AND COALESCE(
+    p.other_coauthor_current_target_country,
+    0
+  ) = 0
+
+GROUP BY
+
+  e.focal_author_id,
+  e.broker_author_id,
+  e.broker_country_code,
+
+  e.joint_work_id,
+  e.joint_year;
+
+
+-- =====================================================================
+-- 7. OTHER-FOREIGN NEGATIVE CONTROL
+--
+-- For every focal paper, average citation share across the other
+-- 37 foreign training countries.
+--
+-- This gives a country-specificity comparison:
+--
+--   matching-country change
+--       versus
+--   other-foreign change
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig4final_other_country_access`
+AS
+
+WITH event_papers AS (
+
+  SELECT DISTINCT
+
+    e.focal_author_id,
+    e.broker_author_id,
+    e.broker_country_code,
+
+    e.joint_work_id,
+    e.joint_year,
+
+    a.work_id,
+    a.publication_year,
+
+    CASE
+
+      WHEN a.publication_year BETWEEN
+        e.joint_year - 3
+        AND
+        e.joint_year - 1
+      THEN 'pre'
+
+      WHEN a.publication_year BETWEEN
+        e.joint_year + 1
+        AND
+        e.joint_year + 3
+      THEN 'post'
+
+      ELSE NULL
+
+    END AS period
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig4v2_joint_events` e
+
+  JOIN
+    `foreign-phd.unitanalysis.broker2_fig4v2_aarc_paper_authors` a
+
+  ON
+    e.focal_author_id =
+      a.author_id
+
+    AND a.degree_country_code = 'US'
+
+    AND (
+      a.publication_year BETWEEN
+        e.joint_year - 3
+        AND
+        e.joint_year - 1
+
+      OR
+
+      a.publication_year BETWEEN
+        e.joint_year + 1
+        AND
+        e.joint_year + 3
+    )
+),
+
+other_country_paper AS (
+
+  SELECT
+
+    ep.focal_author_id,
+    ep.broker_author_id,
+    ep.broker_country_code,
+
+    ep.joint_work_id,
+    ep.joint_year,
+
+    ep.work_id,
+    ep.period,
+
+    AVG(
+      p.target_country_share_no_team_self
+    ) AS other_foreign_share
+
+  FROM event_papers ep
+
+  JOIN
+    `foreign-phd.unitanalysis.broker2_paper_country50` p
+
+  ON
+    ep.work_id =
+      p.work_id
+
+  JOIN
+    `foreign-phd.unitanalysis.broker2_fig4v2_countries38` c
+
+  ON
+    p.target_country_code =
+      c.country_code
+
+  WHERE
+
+    p.target_country_code !=
+      ep.broker_country_code
+
+    AND p.n_refs_with_country >= 10
+
+    AND p.target_country_share_no_team_self
+        IS NOT NULL
+
+  GROUP BY
+
+    ep.focal_author_id,
+    ep.broker_author_id,
+    ep.broker_country_code,
+
+    ep.joint_work_id,
+    ep.joint_year,
+
+    ep.work_id,
+    ep.period
+)
+
+SELECT
+
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+
+  joint_work_id,
+  joint_year,
+
+  AVG(
+    IF(
+      period = 'pre',
+      other_foreign_share,
+      NULL
+    )
+  ) AS pre_other_foreign_share,
+
+  AVG(
+    IF(
+      period = 'post',
+      other_foreign_share,
+      NULL
+    )
+  ) AS post_other_foreign_share
+
+FROM other_country_paper
+
+GROUP BY
+
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+
+  joint_work_id,
+  joint_year;
+
+
+-- =====================================================================
+-- 8. FINAL FIGURE 4 ANALYSIS PANEL
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig4final_analysis`
+AS
+
+SELECT
+
+  e.focal_author_id,
+  e.broker_author_id,
+  e.broker_country_code,
+
+  e.joint_work_id,
+  e.joint_year,
+
+  -- ---------------------------------------------------------
+  -- PANEL A
+  -- ---------------------------------------------------------
+
+  b.broker_joint_cosine,
+
+  f.focal_joint_cosine,
+
+  b.broker_joint_cosine
+    - f.focal_joint_cosine
+      AS broker_vs_focal_joint_advantage,
+
+  -- ---------------------------------------------------------
+  -- PANEL B
+  -- ---------------------------------------------------------
+
+  pre.pre_country_share,
+
+  joint.joint_country_share,
+
+  joint.joint_country_share
+    - pre.pre_country_share
+      AS joint_country_lift,
+
+  -- ---------------------------------------------------------
+  -- PANEL C
+  -- ---------------------------------------------------------
+
+  post.post_country_share,
+
+  post.post_year1_country_share,
+
+  post.post_country_share
+    - pre.pre_country_share
+      AS post_country_change,
+
+  other.pre_other_foreign_share,
+
+  other.post_other_foreign_share,
+
+  other.post_other_foreign_share
+    - other.pre_other_foreign_share
+      AS other_foreign_change,
+
+  (
+    post.post_country_share
+      - pre.pre_country_share
+  )
+  -
+  (
+    other.post_other_foreign_share
+      - other.pre_other_foreign_share
+  )
+    AS country_specific_access_change,
+
+  -- ---------------------------------------------------------
+  -- SAMPLE COUNTS
+  -- ---------------------------------------------------------
+
+  pre.n_pre_country_papers,
+
+  post.n_post_country_papers,
+
+  post.n_post_year1_country_papers,
+
+  -- ---------------------------------------------------------
+  -- FIXED EFFECT IDS
+  -- ---------------------------------------------------------
+
+  CONCAT(
+    CAST(e.focal_author_id AS STRING),
+    '|',
+    CAST(e.broker_author_id AS STRING)
+  ) AS focal_broker_fe,
+
+  CAST(
+    e.joint_year AS STRING
+  ) AS joint_year_fe,
+
+  CONCAT(
+    e.broker_country_code,
+    '|',
+    CAST(e.joint_year AS STRING)
+  ) AS broker_country_year_fe
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig4v2_joint_events` e
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4v2_joint_similarity` b
+
+USING (
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+  joint_work_id,
+  joint_year
+)
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4final_joint_focal_similarity` f
+
+USING (
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+  joint_work_id,
+  joint_year
+)
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4final_pre_country_access` pre
+
+USING (
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+  joint_work_id,
+  joint_year
+)
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4final_joint_country_access` joint
+
+USING (
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+  joint_work_id,
+  joint_year
+)
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4final_post_country_access` post
+
+USING (
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+  joint_work_id,
+  joint_year
+)
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig4final_other_country_access` other
+
+USING (
+  focal_author_id,
+  broker_author_id,
+  broker_country_code,
+  joint_work_id,
+  joint_year
+);
+
+
+-- =====================================================================
+-- 9. HARD VALIDATION
+-- =====================================================================
+
+SELECT
+
+  COUNT(*) AS n_events,
+
+  COUNT(DISTINCT focal_author_id)
+    AS n_focal_scientists,
+
+  COUNT(DISTINCT broker_author_id)
+    AS n_brokers,
+
+  COUNT(DISTINCT focal_broker_fe)
+    AS n_focal_broker_pairs,
+
+  COUNT(DISTINCT broker_country_code)
+    AS n_countries,
+
+  AVG(broker_joint_cosine)
+    AS mean_broker_joint_similarity,
+
+  AVG(focal_joint_cosine)
+    AS mean_focal_joint_similarity,
+
+  AVG(broker_vs_focal_joint_advantage)
+    AS mean_broker_advantage,
+
+  AVG(pre_country_share)
+    AS mean_pre_country_share,
+
+  AVG(joint_country_share)
+    AS mean_joint_country_share,
+
+  AVG(joint_country_lift)
+    AS mean_joint_country_lift,
+
+  AVG(post_country_share)
+    AS mean_post_country_share,
+
+  AVG(post_country_change)
+    AS mean_post_country_change,
+
+  AVG(other_foreign_change)
+    AS mean_other_foreign_change,
+
+  AVG(country_specific_access_change)
+    AS mean_country_specific_access_change,
+
+  COUNTIF(
+    broker_joint_cosine < -0.000001
+    OR broker_joint_cosine > 1.000001
+  ) AS invalid_broker_cosine,
+
+  COUNTIF(
+    focal_joint_cosine < -0.000001
+    OR focal_joint_cosine > 1.000001
+  ) AS invalid_focal_cosine
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig4final_analysis`;
+
+
+-- =====================================================================
+-- 10. COUNTRY-LEVEL DIAGNOSTIC
+-- =====================================================================
+
+SELECT
+
+  broker_country_code,
+
+  COUNT(*) AS n_events,
+
+  COUNT(DISTINCT focal_author_id)
+    AS n_focal_scientists,
+
+  AVG(broker_vs_focal_joint_advantage)
+    AS mean_broker_advantage,
+
+  AVG(joint_country_lift)
+    AS mean_joint_country_lift,
+
+  AVG(post_country_change)
+    AS mean_post_country_change,
+
+  AVG(other_foreign_change)
+    AS mean_other_foreign_change,
+
+  AVG(country_specific_access_change)
+    AS mean_country_specific_access_change
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig4final_analysis`
+
+GROUP BY
+  broker_country_code
+
+ORDER BY
+  n_events DESC;
