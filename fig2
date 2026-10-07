@@ -1,0 +1,742 @@
+-- =====================================================================
+-- FIGURE 2
+-- COUNTRY SPECIFICITY OF THE TRAINING-COUNTRY KNOWLEDGE IMPRINT
+--
+-- Core question:
+-- Does training in country d disproportionately increase citations
+-- to knowledge from country d, rather than to foreign countries generally?
+--
+-- Exposure countries:
+-- 38 doctoral-training countries represented by >=50 professors.
+--
+-- Cited-country targets:
+-- same 38 countries.
+--
+-- Unit:
+-- paper x training-country d x cited-country c
+--
+-- Main estimand:
+-- adjusted percentage-point difference in cited-country share between
+-- papers with vs without a faculty member trained in country d.
+--
+-- Adjustment:
+-- OpenAlex subfield x publication year standardization.
+--
+-- =====================================================================
+
+
+-- =====================================================================
+-- 0. FIXED 38-COUNTRY SET
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_main38_countries` AS
+
+SELECT
+  degree_country,
+  country_code,
+  n_faculty,
+  degree_country_rank
+
+FROM
+  `foreign-phd.unitanalysis.broker2_target_countries`
+
+WHERE country_code IN (
+  'GB','CA','DE','CN','IN','RU','FR','AU','IT','JP',
+  'IL','CH','NL','ES','PL','KR','SE','AR','BE','AT',
+  'BR','NZ','IE','ZA','DK','GR','UA','SG','RO','HU',
+  'MX','IR','FI','TR','BG','EG','PK','TW'
+);
+
+
+-- =====================================================================
+-- 1. PAPER x TRAINING-COUNTRY EXPOSURE
+--
+-- Restrict the existing paper-country panel to the 38 training countries.
+-- This gives one row per paper x training country d.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig2_training_exposure` AS
+
+SELECT
+
+  p.work_id,
+  p.publication_year,
+
+  p.target_degree_country AS training_country,
+  p.target_country_code AS training_country_code,
+
+  p.degree_country_faculty_n AS training_country_n_faculty,
+
+  p.has_matching_degree_author,
+
+  p.subfield_id,
+  p.subfield_name,
+
+  p.n_refs_with_country,
+  p.reference_country_coverage
+
+FROM
+  `foreign-phd.unitanalysis.broker2_paper_country50` p
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_main38_countries` c
+
+ON
+  p.target_country_code = c.country_code
+
+WHERE
+  p.subfield_id IS NOT NULL
+
+  AND p.n_refs_with_country >= 10
+
+  AND p.publication_year BETWEEN 2011 AND 2020;
+
+
+-- =====================================================================
+-- 2. PAPER x CITED-COUNTRY SHARES FOR THE SAME 38 COUNTRIES
+--
+-- broker2_paper_cited_country contains country citation mass by paper.
+--
+-- Convert to share using the same denominator used in Figure 1:
+-- references with mapped country information.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig2_cited_country_share` AS
+
+SELECT
+
+  p.work_id,
+
+  c.degree_country AS cited_country,
+  c.country_code AS cited_country_code,
+
+  SAFE_DIVIDE(
+    COALESCE(pc.country_mass, 0),
+    p.n_refs_with_country
+  ) AS cited_country_share
+
+FROM
+  (
+    SELECT DISTINCT
+      work_id,
+      n_refs_with_country
+    FROM
+      `foreign-phd.unitanalysis.broker2_paper_country50`
+    WHERE
+      n_refs_with_country >= 10
+  ) p
+
+CROSS JOIN
+  `foreign-phd.unitanalysis.broker2_main38_countries` c
+
+LEFT JOIN
+  `foreign-phd.unitanalysis.broker2_paper_cited_country` pc
+
+ON
+  p.work_id = pc.work_id
+  AND c.country_code = pc.cited_country_code;
+
+
+-- =====================================================================
+-- 3. FULL PAPER x TRAINING COUNTRY x CITED COUNTRY PANEL
+--
+-- 38 x 38 country combinations for each eligible paper.
+--
+-- This is much larger than Figure 1, but still downstream of the
+-- expensive OpenAlex extraction.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig2_panel` AS
+
+SELECT
+
+  e.work_id,
+  e.publication_year,
+
+  e.training_country,
+  e.training_country_code,
+  e.training_country_n_faculty,
+
+  s.cited_country,
+  s.cited_country_code,
+
+  e.has_matching_degree_author,
+
+  s.cited_country_share,
+
+  e.subfield_id,
+  e.subfield_name,
+
+  CASE
+    WHEN e.training_country_code = s.cited_country_code
+    THEN 1
+    ELSE 0
+  END AS is_diagonal
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig2_training_exposure` e
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig2_cited_country_share` s
+
+USING (work_id);
+
+
+-- =====================================================================
+-- 4. SUBFIELD x YEAR STRATUM EFFECTS
+--
+-- For every training-country d x cited-country c pair:
+--
+-- exposed:
+-- papers with a faculty member trained in d
+--
+-- control:
+-- papers without a faculty member trained in d
+--
+-- outcome:
+-- share of references attributed to cited country c
+--
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig2_strata` AS
+
+WITH grouped AS (
+
+  SELECT
+
+    training_country,
+    training_country_code,
+
+    cited_country,
+    cited_country_code,
+
+    ANY_VALUE(training_country_n_faculty)
+      AS training_country_n_faculty,
+
+    subfield_id,
+    publication_year,
+
+    COUNTIF(
+      has_matching_degree_author = 1
+    ) AS n_exposed,
+
+    AVG(
+      IF(
+        has_matching_degree_author = 1,
+        cited_country_share,
+        NULL
+      )
+    ) AS exposed_mean,
+
+    VAR_SAMP(
+      IF(
+        has_matching_degree_author = 1,
+        cited_country_share,
+        NULL
+      )
+    ) AS exposed_variance,
+
+    COUNTIF(
+      has_matching_degree_author = 0
+    ) AS n_control,
+
+    AVG(
+      IF(
+        has_matching_degree_author = 0,
+        cited_country_share,
+        NULL
+      )
+    ) AS control_mean,
+
+    VAR_SAMP(
+      IF(
+        has_matching_degree_author = 0,
+        cited_country_share,
+        NULL
+      )
+    ) AS control_variance
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig2_panel`
+
+  GROUP BY
+
+    training_country,
+    training_country_code,
+
+    cited_country,
+    cited_country_code,
+
+    subfield_id,
+    publication_year
+)
+
+SELECT
+
+  *,
+
+  exposed_mean - control_mean
+    AS stratum_difference
+
+FROM grouped
+
+WHERE
+  n_exposed >= 5
+  AND n_control >= 20
+  AND exposed_mean IS NOT NULL
+  AND control_mean IS NOT NULL;
+
+
+-- =====================================================================
+-- 5. STANDARDIZED COUNTRY-PAIR EFFECTS
+--
+-- Standardize to the exposed-paper subfield-year distribution
+-- for each training-country x cited-country pair.
+--
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig2_pair_results` AS
+
+WITH totals AS (
+
+  SELECT
+
+    training_country,
+    training_country_code,
+
+    cited_country,
+    cited_country_code,
+
+    ANY_VALUE(training_country_n_faculty)
+      AS training_country_n_faculty,
+
+    SUM(n_exposed)
+      AS n_exposed_adjusted,
+
+    COUNT(*)
+      AS n_valid_strata
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig2_strata`
+
+  GROUP BY
+
+    training_country,
+    training_country_code,
+
+    cited_country,
+    cited_country_code
+),
+
+weighted AS (
+
+  SELECT
+
+    s.training_country,
+    s.training_country_code,
+
+    s.cited_country,
+    s.cited_country_code,
+
+    t.training_country_n_faculty,
+    t.n_exposed_adjusted,
+    t.n_valid_strata,
+
+    SAFE_DIVIDE(
+      s.n_exposed,
+      t.n_exposed_adjusted
+    ) AS stratum_weight,
+
+    s.exposed_mean,
+    s.control_mean,
+
+    s.exposed_variance,
+    s.control_variance,
+
+    s.n_exposed,
+    s.n_control
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig2_strata` s
+
+  JOIN totals t
+
+  USING (
+    training_country,
+    training_country_code,
+    cited_country,
+    cited_country_code
+  )
+),
+
+agg AS (
+
+  SELECT
+
+    training_country,
+    training_country_code,
+
+    cited_country,
+    cited_country_code,
+
+    ANY_VALUE(training_country_n_faculty)
+      AS training_country_n_faculty,
+
+    ANY_VALUE(n_exposed_adjusted)
+      AS n_exposed_adjusted,
+
+    ANY_VALUE(n_valid_strata)
+      AS n_valid_strata,
+
+    SUM(
+      stratum_weight * exposed_mean
+    ) AS exposed_mean_adj,
+
+    SUM(
+      stratum_weight * control_mean
+    ) AS control_mean_adj,
+
+    SUM(
+      POW(stratum_weight, 2)
+      *
+      (
+        SAFE_DIVIDE(
+          COALESCE(exposed_variance, 0),
+          n_exposed
+        )
+        +
+        SAFE_DIVIDE(
+          COALESCE(control_variance, 0),
+          n_control
+        )
+      )
+    ) AS difference_variance
+
+  FROM weighted
+
+  GROUP BY
+
+    training_country,
+    training_country_code,
+
+    cited_country,
+    cited_country_code
+)
+
+SELECT
+
+  training_country,
+  training_country_code,
+
+  cited_country,
+  cited_country_code,
+
+  training_country_n_faculty,
+
+  n_exposed_adjusted,
+  n_valid_strata,
+
+  100 * exposed_mean_adj
+    AS exposed_share_pct,
+
+  100 * control_mean_adj
+    AS control_share_pct,
+
+  100 * (
+    exposed_mean_adj - control_mean_adj
+  ) AS difference_pp_adj,
+
+  100 * SQRT(
+    difference_variance
+  ) AS difference_se_pp,
+
+  100 * (
+    exposed_mean_adj
+    - control_mean_adj
+    - 1.96 * SQRT(difference_variance)
+  ) AS ci95_low_pp,
+
+  100 * (
+    exposed_mean_adj
+    - control_mean_adj
+    + 1.96 * SQRT(difference_variance)
+  ) AS ci95_high_pp,
+
+  SAFE_DIVIDE(
+    exposed_mean_adj,
+    control_mean_adj
+  ) AS lift_adj,
+
+  CASE
+    WHEN training_country_code = cited_country_code
+    THEN 1
+    ELSE 0
+  END AS is_diagonal
+
+FROM agg;
+
+
+-- =====================================================================
+-- 6. TRAINING-COUNTRY SPECIFICITY SUMMARY
+--
+-- Own-country effect:
+--   diagonal cell
+--
+-- Wrong-country effect:
+--   mean off-diagonal effect for that training country
+--
+-- Specificity:
+--   own-country effect - mean wrong-country effect
+--
+-- Also calculate median wrong-country effect because off-diagonal
+-- effects may be skewed.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig2_specificity` AS
+
+WITH own AS (
+
+  SELECT
+
+    training_country,
+    training_country_code,
+
+    ANY_VALUE(training_country_n_faculty)
+      AS training_country_n_faculty,
+
+    ANY_VALUE(n_exposed_adjusted)
+      AS n_exposed_adjusted,
+
+    MAX(
+      IF(
+        is_diagonal = 1,
+        difference_pp_adj,
+        NULL
+      )
+    ) AS own_country_effect_pp
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig2_pair_results`
+
+  GROUP BY
+    training_country,
+    training_country_code
+),
+
+wrong AS (
+
+  SELECT
+
+    training_country,
+    training_country_code,
+
+    AVG(
+      IF(
+        is_diagonal = 0,
+        difference_pp_adj,
+        NULL
+      )
+    ) AS mean_wrong_country_effect_pp,
+
+    APPROX_QUANTILES(
+      IF(
+        is_diagonal = 0,
+        difference_pp_adj,
+        NULL
+      ),
+      100
+    )[OFFSET(50)] AS median_wrong_country_effect_pp,
+
+    STDDEV_SAMP(
+      IF(
+        is_diagonal = 0,
+        difference_pp_adj,
+        NULL
+      )
+    ) AS sd_wrong_country_effect_pp,
+
+    COUNTIF(
+      is_diagonal = 0
+    ) AS n_wrong_country_pairs
+
+  FROM
+    `foreign-phd.unitanalysis.broker2_fig2_pair_results`
+
+  GROUP BY
+    training_country,
+    training_country_code
+)
+
+SELECT
+
+  o.training_country,
+  o.training_country_code,
+
+  o.training_country_n_faculty,
+  o.n_exposed_adjusted,
+
+  o.own_country_effect_pp,
+
+  w.mean_wrong_country_effect_pp,
+  w.median_wrong_country_effect_pp,
+  w.sd_wrong_country_effect_pp,
+  w.n_wrong_country_pairs,
+
+  o.own_country_effect_pp
+    - w.mean_wrong_country_effect_pp
+    AS specificity_mean_pp,
+
+  o.own_country_effect_pp
+    - w.median_wrong_country_effect_pp
+    AS specificity_median_pp,
+
+  SAFE_DIVIDE(
+    o.own_country_effect_pp,
+    NULLIF(w.mean_wrong_country_effect_pp, 0)
+  ) AS own_to_wrong_ratio
+
+FROM own o
+
+JOIN wrong w
+
+USING (
+  training_country,
+  training_country_code
+);
+
+
+-- =====================================================================
+-- 7. TOP 12 FOR HEATMAP / PAIRED PLOT
+--
+-- Mechanical selection by training faculty count.
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig2_top12` AS
+
+SELECT
+  training_country,
+  training_country_code,
+  training_country_n_faculty
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig2_specificity`
+
+QUALIFY
+  ROW_NUMBER() OVER (
+    ORDER BY
+      training_country_n_faculty DESC,
+      training_country
+  ) <= 12;
+
+
+-- =====================================================================
+-- 8. 12 x 12 HEATMAP DATA
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig2_heatmap12` AS
+
+SELECT
+  r.*
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig2_pair_results` r
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig2_top12` tr
+
+ON
+  r.training_country_code = tr.training_country_code
+
+JOIN
+  `foreign-phd.unitanalysis.broker2_fig2_top12` cr
+
+ON
+  r.cited_country_code = cr.training_country_code;
+
+
+-- =====================================================================
+-- 9. POOLED DIAGONAL VS OFF-DIAGONAL SUMMARY
+-- =====================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.unitanalysis.broker2_fig2_diag_offdiag_summary` AS
+
+SELECT
+
+  is_diagonal,
+
+  COUNT(*) AS n_pairs,
+
+  AVG(difference_pp_adj)
+    AS mean_effect_pp,
+
+  APPROX_QUANTILES(
+    difference_pp_adj,
+    100
+  )[OFFSET(50)]
+    AS median_effect_pp,
+
+  APPROX_QUANTILES(
+    difference_pp_adj,
+    100
+  )[OFFSET(25)]
+    AS q25_effect_pp,
+
+  APPROX_QUANTILES(
+    difference_pp_adj,
+    100
+  )[OFFSET(75)]
+    AS q75_effect_pp
+
+FROM
+  `foreign-phd.unitanalysis.broker2_fig2_pair_results`
+
+GROUP BY
+  is_diagonal;
+
+
+-- =====================================================================
+-- 10. VALIDATION
+-- =====================================================================
+
+-- 38 x 38 = 1,444 expected country pairs if every pair is estimable.
+
+SELECT
+  COUNT(*) AS n_country_pairs,
+  COUNTIF(is_diagonal = 1) AS n_diagonal,
+  COUNTIF(is_diagonal = 0) AS n_offdiagonal
+FROM
+  `foreign-phd.unitanalysis.broker2_fig2_pair_results`;
+
+
+-- Specificity should ideally be positive for most/all systems.
+
+SELECT
+  COUNT(*) AS n_training_countries,
+  COUNTIF(specificity_mean_pp > 0) AS n_positive_specificity,
+  AVG(specificity_mean_pp) AS mean_specificity_pp,
+  APPROX_QUANTILES(
+    specificity_mean_pp,
+    100
+  )[OFFSET(50)] AS median_specificity_pp
+FROM
+  `foreign-phd.unitanalysis.broker2_fig2_specificity`;
+
+
+-- Final country-level specificity table.
+
+SELECT *
+FROM
+  `foreign-phd.unitanalysis.broker2_fig2_specificity`
+
+ORDER BY
+  specificity_mean_pp DESC;
